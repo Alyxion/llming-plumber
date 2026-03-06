@@ -120,7 +120,7 @@ An existing application can integrate it in two ways:
 
 ```python
 # Option A — mount as sub-application
-from plumber import create_app as create_plumber_app
+from llming_plumber import create_app as create_plumber_app
 
 app = FastAPI()
 app.mount("/plumber", create_plumber_app(mode="all"))
@@ -128,8 +128,8 @@ app.mount("/plumber", create_plumber_app(mode="all"))
 
 ```python
 # Option B — include just the API router (more control)
-from plumber.api import router as plumber_router
-from plumber.worker import create_worker
+from llming_plumber.api import router as plumber_router
+from llming_plumber.worker import create_worker
 
 app = FastAPI()
 app.include_router(plumber_router, prefix="/plumber/api")
@@ -144,7 +144,7 @@ async def start_worker():
 The worker can also run as a standalone process with no HTTP server at all:
 
 ```bash
-arq plumber.worker.WorkerSettings
+arq llming_plumber.worker.WorkerSettings
 ```
 
 ---
@@ -247,16 +247,16 @@ from uuid import uuid4
 from arq import cron
 from arq.connections import RedisSettings
 
-from plumber.config import settings
-from plumber.worker.executor import execute_workflow
-from plumber.worker.scheduler import check_schedules
+from llming_plumber.config import settings
+from llming_plumber.worker.executor import execute_workflow
+from llming_plumber.worker.scheduler import check_schedules
 
 
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex[:8]}"
 
 
 class WorkerSettings:
-    """ARQ worker configuration — run with `arq plumber.worker.WorkerSettings`."""
+    """ARQ worker configuration — run with `arq llming_plumber.worker.WorkerSettings`."""
 
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
 
@@ -571,7 +571,7 @@ OPENWEATHER_API_BASE=https://api.openweathermap.org
 ## Project Layout
 
 ```
-plumber/
+llming_plumber/                  # the installable package
 ├── __init__.py              # create_app() factory
 ├── config.py                # Settings (pydantic-settings, reads .env)
 ├── models/
@@ -598,7 +598,7 @@ plumber/
 │   ├── weather.py
 │   └── ...
 ├── db.py                    # MongoDB + Redis connection helpers
-└── cli.py                   # `plumber serve --mode=...`
+└── cli.py                   # `llming-plumber serve --mode=...`
 ```
 
 ---

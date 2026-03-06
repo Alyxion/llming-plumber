@@ -17,10 +17,10 @@ All data structures are Pydantic models. No raw dicts crossing function boundari
 
 ## Node (Plugin) Architecture
 
-Every node is **self-contained** in a single module under `plumber/nodes/`. A node consists of:
+Every node is **self-contained** in a single module under `llming_plumber/nodes/`. A node consists of:
 
 ```python
-from plumber.nodes.base import BaseNode, NodeInput, NodeOutput
+from llming_plumber.nodes.base import BaseNode, NodeInput, NodeOutput
 
 class RssReaderInput(NodeInput):
     """Pydantic model defining what this node accepts."""
@@ -42,18 +42,18 @@ class RssReaderNode(BaseNode[RssReaderInput, RssReaderOutput]):
 
 ### Rules
 
-- **One file per node** — `plumber/nodes/rss_reader.py`, `plumber/nodes/weather.py`, etc.
+- **One file per node** — `llming_plumber/nodes/rss_reader.py`, `llming_plumber/nodes/weather.py`, etc.
 - **No cross-node imports** — nodes never import from each other.
 - **No global state** — all dependencies come through `NodeContext`.
 - **Input/Output models are the contract** — the executor validates data against these models when piping between nodes.
 
 ### Standalone Usability
 
-Every node must work **independently** of the Plumber engine. A developer should be able to `pip install plumber` and use a single node without running MongoDB, Redis, or any server:
+Every node must work **independently** of the Plumber engine. A developer should be able to `pip install llming-plumber` and use a single node without running MongoDB, Redis, or any server:
 
 ```python
 # Using the weather node as a standalone library — no server, no worker, no DB
-from plumber.nodes.weather import WeatherNode, WeatherInput
+from llming_plumber.nodes.weather import WeatherNode, WeatherInput
 
 node = WeatherNode()
 result = await node.execute(
@@ -68,9 +68,9 @@ This makes every node reusable as a plain Python library — embed the weather n
 
 The node must **never assume it's running inside a workflow**. `NodeContext` is optional and only provides workflow-level features (logging, credential lookup) when present. This means:
 
-- No imports from `plumber.worker`, `plumber.db`, or `plumber.api` inside node code.
+- No imports from `llming_plumber.worker`, `llming_plumber.db`, or `llming_plumber.api` inside node code.
 - Configuration (API keys, URLs) comes via the input model, not from environment variables or global config. When running inside Plumber, the executor resolves credentials and injects them into the input.
-- Nodes only depend on `plumber.nodes.base` and their own third-party libraries (e.g. `feedparser` for RSS, `httpx` for HTTP).
+- Nodes only depend on `llming_plumber.nodes.base` and their own third-party libraries (e.g. `feedparser` for RSS, `httpx` for HTTP).
 
 ## Sockets & Piping
 
@@ -121,12 +121,12 @@ Every change must be **safe to deploy without breaking existing workflows**.
 
 It must be trivially easy to add new nodes — from internal code or from external packages.
 
-- **Auto-discovery** — Plumber scans `plumber/nodes/` for all `BaseNode` subclasses at startup. Drop a file in, it's available.
-- **Entry point plugins** — external packages can register nodes via Python entry points (`[project.entry-points."plumber.nodes"]`). This allows third-party libraries to ship Plumber-compatible nodes without forking the repo:
+- **Auto-discovery** — Plumber scans `llming_plumber/nodes/` for all `BaseNode` subclasses at startup. Drop a file in, it's available.
+- **Entry point plugins** — external packages can register nodes via Python entry points (`[project.entry-points."llming_plumber.nodes"]`). This allows third-party libraries to ship Plumber-compatible nodes without forking the repo:
 
 ```toml
 # In an external package's pyproject.toml
-[project.entry-points."plumber.nodes"]
+[project.entry-points."llming_plumber.nodes"]
 my_custom_node = "my_package.nodes:MyCustomNode"
 ```
 
@@ -182,20 +182,20 @@ class WorkflowDefinition(BaseModel):
 source .venv/bin/activate
 
 # All-in-one
-plumber serve --mode=all
+llming-plumber serve --mode=all
 
 # UI only
-plumber serve --mode=ui
+llming-plumber serve --mode=ui
 
 # Worker only (via ARQ)
-arq plumber.worker.WorkerSettings
+arq llming_plumber.worker.WorkerSettings
 
 # Tests
-pytest --cov=plumber --cov-fail-under=99 -n auto
+pytest --cov=llming_plumber --cov-fail-under=99 -n auto
 
 # Type checking
-mypy plumber/ --strict
+mypy llming_plumber/ --strict
 
 # Lint
-ruff check plumber/ tests/
+ruff check llming_plumber/ tests/
 ```

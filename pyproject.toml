@@ -2,9 +2,13 @@
 name = "llming-plumber"
 version = "0.1.0"
 requires-python = ">=3.13"
+license = "AGPL-3.0-or-later"
 dependencies = [
     "fastapi[standard]",
 ]
+
+[project.scripts]
+llming-plumber = "llming_plumber.cli:main"
 
 [project.optional-dependencies]
 dev = [
