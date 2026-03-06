@@ -4,7 +4,24 @@
 
 - **>99% mypy coverage** — strict mode, no `Any` escape hatches, no `type: ignore` without a comment explaining why.
 - **>99% test coverage** — every block, every model, every API route. Use `pytest-cov` with `--cov-fail-under=99`.
-- Tests must run fast. Mock external services, never hit real APIs in CI.
+- Unit tests must run fast. Mock external services, never hit real APIs in CI.
+
+### Two Test Layers (Always Required)
+
+Every feature that touches external services **must** have both:
+
+1. **Unit tests** — mocked, fast, run in CI. Verify logic, error handling, data mapping.
+2. **Integration tests** — marked `@pytest.mark.integration`, call real APIs with keys from `.env`. Verify actual end-to-end behavior.
+
+```bash
+# Unit tests only (CI-safe, no API keys needed)
+pytest -m "not integration" --cov=llming_plumber --cov-fail-under=99
+
+# Integration tests (requires .env with valid API keys)
+pytest -m integration -v
+```
+
+Integration tests are **not optional** — they catch real-world issues that mocks cannot: auth failures, API changes, response format drift, rate limits. When adding a new LLM provider or external-API block, always add integration tests that exercise the full request/response cycle.
 
 ## Async Everywhere
 
@@ -116,6 +133,7 @@ Every block has a matching test file: `tests/blocks/news/test_rss_reader.py`.
 Blocks are trivially testable in isolation because they are pure `async` functions with Pydantic in/out:
 
 ```python
+# Unit test — mocked HTTP, runs in CI
 async def test_rss_reader():
     block = RssReaderBlock()
     result = await block.execute(
@@ -127,6 +145,26 @@ async def test_rss_reader():
 ```
 
 All block tests can run in parallel (`pytest -n auto`) because blocks are isolated and share no state. This is a direct consequence of the standalone design — if a block works without the engine, it works without other blocks too.
+
+## Testing LLM Providers
+
+Every LLM provider has two test files:
+
+- `tests/llm/test_providers.py` — **unit tests** (mocked env, no API calls). Verify registration, model catalogues, client creation, error handling.
+- `tests/llm/test_providers_integration.py` — **integration tests** (real API calls). Every provider must have tests for all four call modes: `invoke`, `ainvoke`, `stream`, `astream`.
+
+```python
+# Integration test — calls real API, marked so CI skips it
+@pytest.mark.integration
+class TestAnthropicIntegration:
+    def test_invoke(self) -> None:
+        client = _create_client("anthropic")
+        result = client.invoke(_messages())
+        assert isinstance(result, LlmAIMessage)
+        assert len(result.content) > 0
+```
+
+When adding a new provider, **always** add both unit and integration tests. The integration tests are the ground truth — if the integration test fails, the provider is broken regardless of what unit tests say.
 
 ## Backward Compatibility
 

@@ -42,7 +42,7 @@ class BlockContext(BaseModel):
     block_id: str = ""
 
 
-class BaseBlock[I: BlockInput, O: BlockOutput](ABC):
+class BaseBlock[InputT: BlockInput, OutputT: BlockOutput](ABC):
     """Base class for all Plumber blocks.
 
     Every block declares its type, input/output models, and an async execute method.
@@ -56,5 +56,5 @@ class BaseBlock[I: BlockInput, O: BlockOutput](ABC):
     description: ClassVar[str] = ""
 
     @abstractmethod
-    async def execute(self, input: I, ctx: BlockContext | None = None) -> O:
+    async def execute(self, input: InputT, ctx: BlockContext | None = None) -> OutputT:
         ...

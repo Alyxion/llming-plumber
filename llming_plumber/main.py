@@ -1,8 +1,5 @@
-from fastapi import FastAPI
+from __future__ import annotations
 
-app = FastAPI()
+from llming_plumber import create_app
 
-
-@app.get("/")
-async def root() -> dict[str, str]:
-    return {"message": "hello world"}
+app = create_app()

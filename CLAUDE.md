@@ -2,7 +2,7 @@
 
 ## Naming
 
-Plumber uses themed naming. See the glossary in [Data Piping](docs/data-piping.md) for the full mapping.
+Plumber uses themed naming. See the glossary in [Data Piping](llming_plumber/docs/data-piping.md) for the full mapping.
 
 | Plumber Term | Industry Equivalent |
 |---|---|
@@ -19,16 +19,37 @@ Plumber uses themed naming. See the glossary in [Data Piping](docs/data-piping.m
 
 The docs are the source of truth. **Always keep them up to date** — when you change behavior, update the relevant doc in the same change.
 
-- [Architecture](docs/architecture.md) — deployment modes, ARQ + Redis dispatch, MongoDB collections, run lifecycle, lemming config
-- [Building Blocks](docs/building-blocks.md) — 67 core block types organized by category with implementation priority tiers
-- [Coding Principles](docs/coding-principles.md) — async everywhere, type safety, testing, block architecture, standalone usability, MCP tool generation, backward compatibility, extensibility & block discovery, no-code/visual editor parity, i18n
-- [Data Piping](docs/data-piping.md) — fitting types, type compatibility, coercions, pipe definitions, piping patterns, runtime execution
+- [Architecture](llming_plumber/docs/architecture.md) — deployment modes, ARQ + Redis dispatch, MongoDB collections, run lifecycle, lemming config
+- [Building Blocks](llming_plumber/docs/building-blocks.md) — 67 core block types organized by category with implementation priority tiers
+- [Coding Principles](llming_plumber/docs/coding-principles.md) — async everywhere, type safety, testing, block architecture, standalone usability, MCP tool generation, backward compatibility, extensibility & block discovery, no-code/visual editor parity, i18n
+- [Data Piping](llming_plumber/docs/data-piping.md) — fitting types, type compatibility, coercions, pipe definitions, piping patterns, runtime execution
+
+## Testing
+
+Two test layers are **always required** for every feature:
+
+| Layer | Command | Runs in CI | Purpose |
+|---|---|---|---|
+| **Unit tests** | `pytest -m "not integration"` | Yes | Mocked, fast, 99%+ coverage |
+| **Integration tests** | `pytest -m integration` | No (needs API keys) | Real API calls, verify actual behavior |
+
+- **Unit tests** (`tests/blocks/`, `tests/llm/test_providers.py`) — mock all external I/O (respx, `patch.dict`). Must pass without any API keys or network.
+- **Integration tests** (`tests/llm/test_providers_integration.py`) — hit real APIs using keys from `.env`. Every LLM provider must have integration tests covering `invoke`, `ainvoke`, `stream`, `astream`.
+- **When adding a new provider or block with external dependencies:** always add both unit tests AND integration tests.
+
+## LLM Providers
+
+Synced from `llming-lodge` via `python llming_plumber/scripts/sync_providers.py`. Do NOT edit files in `llming_plumber/llm/` directly — re-run the sync script instead.
+
+Available providers: `openai`, `azure_openai`, `anthropic`, `google`, `mistral`.
 
 ## Quick Reference
 
 - **Stack:** Python 3.13, FastAPI, Pydantic v2, MongoDB (motor), Redis + ARQ, structlog
 - **Package:** `llming_plumber/` (import as `import llming_plumber`)
-- **Tests:** `pytest --cov=llming_plumber --cov-fail-under=99 -n auto`
+- **Unit tests:** `pytest -m "not integration" --cov=llming_plumber --cov-fail-under=99`
+- **Integration tests:** `pytest -m integration -v` (requires `.env` with API keys)
 - **Types:** `mypy llming_plumber/ --strict`
 - **Lint:** `ruff check llming_plumber/ tests/`
+- **Sync providers:** `python llming_plumber/scripts/sync_providers.py`
 - **Run:** `llming-plumber serve --mode=all|ui|worker`

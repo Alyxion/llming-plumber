@@ -8,8 +8,18 @@ dependencies = [
     "httpx",
     "feedparser",
     "pydantic>=2.0",
+    "pydantic-settings>=2.0",
     "beautifulsoup4",
     "jsonpath-ng",
+    "openai>=2.0",
+    "anthropic>=0.40",
+    "google-genai>=1.0",
+    "tiktoken",
+    "motor>=3.0",
+    "redis[hiredis]>=5.0",
+    "arq>=0.26",
+    "structlog>=24.0",
+    "croniter>=2.0",
 ]
 
 [project.scripts]
@@ -24,6 +34,8 @@ dev = [
     "ruff",
     "mypy",
     "types-beautifulsoup4",
+    "mongomock-motor",
+    "fakeredis[lua]>=2.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -31,6 +43,9 @@ include = ["llming_plumber*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "integration: calls real external APIs (requires .env with valid keys)",
+]
 
 [tool.mypy]
 strict = true
