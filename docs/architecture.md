@@ -2,12 +2,12 @@
 
 ## Overview
 
-Plumber is a workflow automation engine built on FastAPI, MongoDB, and Redis.
+Plumber is a pipeline automation engine built on FastAPI, MongoDB, and Redis.
 It can run as a standalone server or be mounted into an existing FastAPI
 application as a sub-application.
 
-**MongoDB** is the source of truth — workflow definitions, job state, logs,
-credentials. **Redis + ARQ** handles job dispatch and coordination — instant
+**MongoDB** is the source of truth — pipeline definitions, run state, logs,
+credentials. **Redis + ARQ** handles run dispatch and coordination — instant
 push-based delivery, exactly-once claiming, retries, and cron scheduling.
 
 ---
@@ -20,7 +20,7 @@ push-based delivery, exactly-once claiming, retries, and cron scheduling.
 │  plumber serve --mode=all                               │
 │                                                         │
 │  ┌─────────────┐  ┌─────────────┐                       │
-│  │   UI (API)   │  │ ARQ Worker  │                       │
+│  │   UI (API)   │  │ ARQ Lemming │                       │
 │  │  /api/...    │  │  (asyncio)  │                       │
 │  └──────┬───────┘  └──────┬──────┘                       │
 │         │                 │                              │
@@ -31,12 +31,12 @@ push-based delivery, exactly-once claiming, retries, and cron scheduling.
 └─────────────────────────────────────────────────────────┘
 
 ┌──────────────────┐       ┌──────────────────┐
-│  Mode 2: UI Only │       │  Mode 3: Worker  │
+│  Mode 2: UI Only │       │  Mode 3: Lemming │
 │  plumber serve   │       │  plumber serve   │
 │   --mode=ui      │       │   --mode=worker  │
 │                  │       │                  │
 │  ┌────────────┐  │       │  ┌────────────┐  │
-│  │  UI (API)  │  │       │  │ ARQ Worker │  │
+│  │  UI (API)  │  │       │  │ ARQ Lemming│  │
 │  │  /api/...  │  │       │  │  (asyncio) │  │
 │  └─────┬──────┘  │       │  └─────┬──────┘  │
 │        │         │       │        │         │
@@ -46,11 +46,11 @@ push-based delivery, exactly-once claiming, retries, and cron scheduling.
     │ MongoDB │  │Redis │    │  Redis   │
     └─────────┘  └──┬───┘    └──────────┘
                     │           │
-    UI enqueues ────┘           └──── Workers dequeue
-    jobs into Redis                   jobs from Redis
+    UI enqueues ────┘           └──── Lemmings dequeue
+    runs into Redis                   runs from Redis
 ```
 
-The UI server enqueues jobs into Redis (via ARQ). Workers pick them up
+The UI server enqueues runs into Redis (via ARQ). Lemmings pick them up
 instantly. MongoDB is read/written by both sides for persistent state,
 but Redis is the dispatch mechanism — no polling, no wasted queries.
 
@@ -66,37 +66,37 @@ push-based dispatch.
 
 | Concern | ARQ feature |
 |---|---|
-| Job dispatch | `await pool.enqueue_job("execute_workflow", job_id=...)` |
-| Exactly-once delivery | Redis atomic `BRPOPLPUSH` — only one worker gets each job |
-| Concurrency control | `max_jobs` setting per worker |
+| Run dispatch | `await pool.enqueue_job("execute_pipeline", run_id=...)` |
+| Exactly-once delivery | Redis atomic `BRPOPLPUSH` — only one lemming gets each run |
+| Concurrency control | `max_jobs` setting per lemming |
 | Retries | Built-in retry with configurable count and backoff |
 | Deferred execution | `_defer_until` and `_defer_by` parameters |
-| Cron scheduling | `cron_jobs` in `WorkerSettings` |
-| Timeouts | `_timeout` per job, `health_check_interval` for crash detection |
-| Job results | Stored in Redis with configurable TTL |
+| Cron scheduling | `cron_jobs` in `LemmingSettings` |
+| Timeouts | `_timeout` per run, `health_check_interval` for crash detection |
+| Run results | Stored in Redis with configurable TTL |
 
 ### What MongoDB still handles
 
 | Concern | Why MongoDB, not Redis |
 |---|---|
-| Workflow definitions | Complex documents with nodes, edges, versions — need querying and indexing |
-| Job history & state | Permanent record, queryable by status/date/workflow/worker |
-| Execution logs | Append-only, indexed by job_id + timestamp, retained indefinitely |
-| Credentials | Encrypted at rest, queried by workflow at execution time |
+| Pipeline definitions | Complex documents with blocks, pipes, versions — need querying and indexing |
+| Run history & state | Permanent record, queryable by status/date/pipeline/lemming |
+| Execution logs | Append-only, indexed by run_id + timestamp, retained indefinitely |
+| Credentials | Encrypted at rest, queried by pipeline at execution time |
 | Schedules | Persisted schedule definitions (ARQ cron triggers them, MongoDB stores them) |
 
 ### Data Flow
 
 ```
-  User clicks "Run"          ARQ enqueues              Worker picks up
+  User clicks "Run"          ARQ enqueues              Lemming picks up
   or cron fires              into Redis                from Redis
        │                         │                         │
        ▼                         ▼                         ▼
   ┌─────────┐   enqueue    ┌──────────┐   BRPOP     ┌──────────┐
-  │ UI/Cron │ ───────────► │  Redis   │ ──────────► │  Worker  │
+  │ UI/Cron │ ───────────► │  Redis   │ ──────────► │ Lemming  │
   └────┬────┘              └──────────┘              └────┬─────┘
        │                                                  │
-       │  write job doc                                   │  update status,
+       │  write run doc                                   │  update status,
        │  status=pending                                  │  write logs
        ▼                                                  ▼
   ┌──────────┐                                      ┌──────────┐
@@ -104,12 +104,12 @@ push-based dispatch.
   └──────────┘                                      └──────────┘
 ```
 
-1. **Trigger** — UI API call, webhook, or ARQ cron job fires.
-2. **Create job doc** — Write a job document to MongoDB with `status: "queued"`.
-3. **Enqueue** — `await arq_pool.enqueue_job("execute_workflow", job_id=str(job_doc._id))`.
-4. **Worker picks up** — ARQ delivers to exactly one worker (instant, no polling).
-5. **Execute** — Worker reads workflow definition from MongoDB, runs nodes sequentially, updates `status: "running"`, writes logs to `job_logs`.
-6. **Complete** — Worker sets `status: "completed"` or `"failed"` in MongoDB.
+1. **Trigger** — UI API call, webhook, or ARQ cron fires.
+2. **Create run doc** — Write a run document to MongoDB with `status: "queued"`.
+3. **Enqueue** — `await arq_pool.enqueue_job("execute_pipeline", run_id=str(run_doc._id))`.
+4. **Lemming picks up** — ARQ delivers to exactly one lemming (instant, no polling).
+5. **Execute** — Lemming reads pipeline definition from MongoDB, runs blocks sequentially, updates `status: "running"`, writes logs to `run_logs`.
+6. **Complete** — Lemming sets `status: "completed"` or `"failed"` in MongoDB.
 
 ---
 
@@ -129,22 +129,22 @@ app.mount("/plumber", create_plumber_app(mode="all"))
 ```python
 # Option B — include just the API router (more control)
 from llming_plumber.api import router as plumber_router
-from llming_plumber.worker import create_worker
+from llming_plumber.worker import create_lemming
 
 app = FastAPI()
 app.include_router(plumber_router, prefix="/plumber/api")
 
-# Start an in-process ARQ worker alongside the API
+# Start an in-process ARQ lemming alongside the API
 @app.on_event("startup")
-async def start_worker():
-    app.state.plumber_worker = create_worker()
-    # Worker runs as a background asyncio task
+async def start_lemming():
+    app.state.plumber_lemming = create_lemming()
+    # Lemming runs as a background asyncio task
 ```
 
-The worker can also run as a standalone process with no HTTP server at all:
+The lemming can also run as a standalone process with no HTTP server at all:
 
 ```bash
-arq llming_plumber.worker.WorkerSettings
+arq llming_plumber.worker.LemmingSettings
 ```
 
 ---
@@ -155,10 +155,10 @@ MongoDB is the persistent source of truth. Redis is ephemeral dispatch.
 
 | Collection | Purpose |
 |---|---|
-| `plumber.workflows` | Workflow definitions (name, nodes, edges, config, version) |
-| `plumber.jobs` | Job instances — one document per execution of a workflow |
-| `plumber.job_logs` | Append-only log entries for each job step |
-| `plumber.schedules` | Cron/interval definitions tied to workflows |
+| `plumber.pipelines` | Pipeline definitions (name, blocks, pipes, config, version) |
+| `plumber.runs` | Run instances — one document per execution of a pipeline |
+| `plumber.run_logs` | Append-only log entries for each run step |
+| `plumber.schedules` | Cron/interval definitions tied to pipelines |
 | `plumber.credentials` | Encrypted credential store for connected services |
 
 Note: the `plumber.locks` collection from the previous design is **gone** —
@@ -167,13 +167,13 @@ ARQ handles distributed locking via Redis.
 ### Key Indexes
 
 ```javascript
-// jobs — query by status, workflow, date
-db.plumber.jobs.createIndex({ status: 1, created_at: -1 })
-db.plumber.jobs.createIndex({ workflow_id: 1, created_at: -1 })
-db.plumber.jobs.createIndex({ worker_id: 1, status: 1 })
+// runs — query by status, pipeline, date
+db.plumber.runs.createIndex({ status: 1, created_at: -1 })
+db.plumber.runs.createIndex({ pipeline_id: 1, created_at: -1 })
+db.plumber.runs.createIndex({ lemming_id: 1, status: 1 })
 
-// job_logs — query logs for a specific job, ordered
-db.plumber.job_logs.createIndex({ job_id: 1, ts: 1 })
+// run_logs — query logs for a specific run, ordered
+db.plumber.run_logs.createIndex({ run_id: 1, ts: 1 })
 
 // schedules — find enabled schedules
 db.plumber.schedules.createIndex({ enabled: 1 })
@@ -181,12 +181,12 @@ db.plumber.schedules.createIndex({ enabled: 1 })
 
 ---
 
-## Job Lifecycle
+## Run Lifecycle
 
 ```
                   schedule/
   ┌──────────┐    API trigger   ┌──────────┐   ARQ dispatches  ┌───────────┐
-  │          │    + enqueue     │          │   to a worker      │           │
+  │          │    + enqueue     │          │   to a lemming     │           │
   │  (none)  │ ──────────────► │  queued  │ ─────────────────► │  running  │
   │          │                  │          │                    │           │
   └──────────┘                  └──────────┘                    └─────┬─────┘
@@ -201,13 +201,13 @@ db.plumber.schedules.createIndex({ enabled: 1 })
                                                             back to queued
 ```
 
-### Job Document
+### Run Document
 
 ```javascript
 {
   _id: ObjectId,
-  workflow_id: ObjectId,
-  workflow_version: 3,
+  pipeline_id: ObjectId,
+  pipeline_version: 3,
   status: "queued" | "running" | "completed" | "failed" | "retrying" | "cancelled",
 
   // Scheduling
@@ -215,15 +215,15 @@ db.plumber.schedules.createIndex({ enabled: 1 })
   started_at: ISODate | null,
   finished_at: ISODate | null,
 
-  // Worker assignment (set when ARQ worker picks up the job)
-  worker_id: "prod-worker-02:48291:a3f1c9e2" | null,
+  // Lemming assignment (set when ARQ lemming picks up the run)
+  lemming_id: "prod-lemming-02:48291:a3f1c9e2" | null,
 
   // ARQ reference
   arq_job_id: "arq:job:abc123" | null,
 
   // Execution
-  current_node: "node-id" | null,
-  node_states: { "node-id": { status, output, error, duration_ms } },
+  current_block: "block-id" | null,
+  block_states: { "block-id": { status, output, error, duration_ms } },
   input: { ... },               // trigger payload
   output: { ... } | null,       // final result
 
@@ -239,7 +239,7 @@ db.plumber.schedules.createIndex({ enabled: 1 })
 
 ---
 
-## ARQ Worker Configuration
+## ARQ Lemming Configuration
 
 ```python
 import socket, os
@@ -248,54 +248,54 @@ from arq import cron
 from arq.connections import RedisSettings
 
 from llming_plumber.config import settings
-from llming_plumber.worker.executor import execute_workflow
+from llming_plumber.worker.executor import execute_pipeline
 from llming_plumber.worker.scheduler import check_schedules
 
 
-WORKER_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex[:8]}"
+LEMMING_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex[:8]}"
 
 
-class WorkerSettings:
-    """ARQ worker configuration — run with `arq llming_plumber.worker.WorkerSettings`."""
+class LemmingSettings:
+    """ARQ lemming configuration — run with `arq llming_plumber.worker.LemmingSettings`."""
 
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
 
     # The task functions ARQ can dispatch to
-    functions = [execute_workflow]
+    functions = [execute_pipeline]
 
-    # Built-in cron: check MongoDB schedules every minute, enqueue due workflows
+    # Built-in cron: check MongoDB schedules every minute, enqueue due pipelines
     cron_jobs = [cron(check_schedules, minute=None)]  # every minute
 
-    # Concurrency: how many jobs this worker runs simultaneously
-    max_jobs = settings.worker_concurrency  # default: 4
+    # Concurrency: how many runs this lemming handles simultaneously
+    max_jobs = settings.lemming_concurrency  # default: 4
 
-    # Health check: if a worker doesn't report in this interval, ARQ marks it dead
+    # Health check: if a lemming doesn't report in this interval, ARQ marks it dead
     health_check_interval = 30
 
-    # Job timeout: kill jobs that run longer than this
+    # Run timeout: kill runs that take longer than this
     job_timeout = 3600  # 1 hour default
 
-    # Pass worker_id to all tasks via ctx
+    # Pass lemming_id to all tasks via ctx
     on_startup = startup
     on_shutdown = shutdown
 
 
 async def startup(ctx):
-    """Called once when the worker starts."""
-    ctx["worker_id"] = WORKER_ID
+    """Called once when the lemming starts."""
+    ctx["lemming_id"] = LEMMING_ID
     ctx["db"] = await connect_to_mongodb()
-    # Register worker heartbeat in MongoDB
-    await ctx["db"].plumber.workers.update_one(
-        {"worker_id": WORKER_ID},
+    # Register lemming heartbeat in MongoDB
+    await ctx["db"].plumber.lemmings.update_one(
+        {"lemming_id": LEMMING_ID},
         {"$set": {"started_at": datetime.utcnow(), "status": "online"}},
         upsert=True,
     )
 
 
 async def shutdown(ctx):
-    """Called when the worker shuts down."""
-    await ctx["db"].plumber.workers.update_one(
-        {"worker_id": WORKER_ID},
+    """Called when the lemming shuts down."""
+    await ctx["db"].plumber.lemmings.update_one(
+        {"lemming_id": LEMMING_ID},
         {"$set": {"status": "offline", "stopped_at": datetime.utcnow()}},
     )
 ```
@@ -303,30 +303,30 @@ async def shutdown(ctx):
 ### Task Function
 
 ```python
-async def execute_workflow(ctx: dict, *, job_id: str) -> dict:
-    """Execute a workflow job. Called by ARQ when a job is dequeued."""
+async def execute_pipeline(ctx: dict, *, run_id: str) -> dict:
+    """Execute a pipeline run. Called by ARQ when a run is dequeued."""
     db = ctx["db"]
-    worker_id = ctx["worker_id"]
+    lemming_id = ctx["lemming_id"]
 
     # Mark running in MongoDB
-    job = await db.plumber.jobs.find_one_and_update(
-        {"_id": ObjectId(job_id), "status": "queued"},
+    run = await db.plumber.runs.find_one_and_update(
+        {"_id": ObjectId(run_id), "status": "queued"},
         {"$set": {
             "status": "running",
-            "worker_id": worker_id,
+            "lemming_id": lemming_id,
             "started_at": datetime.utcnow(),
         }},
         return_document=ReturnDocument.AFTER,
     )
-    if not job:
+    if not run:
         return {"skipped": True}  # already cancelled or picked up
 
-    workflow = await db.plumber.workflows.find_one({"_id": job["workflow_id"]})
+    pipeline = await db.plumber.pipelines.find_one({"_id": run["pipeline_id"]})
 
     try:
-        result = await run_nodes(workflow, job, db, worker_id)
-        await db.plumber.jobs.update_one(
-            {"_id": ObjectId(job_id)},
+        result = await run_blocks(pipeline, run, db, lemming_id)
+        await db.plumber.runs.update_one(
+            {"_id": ObjectId(run_id)},
             {"$set": {
                 "status": "completed",
                 "output": result,
@@ -336,8 +336,8 @@ async def execute_workflow(ctx: dict, *, job_id: str) -> dict:
         return result
 
     except Exception as e:
-        await db.plumber.jobs.update_one(
-            {"_id": ObjectId(job_id)},
+        await db.plumber.runs.update_one(
+            {"_id": ObjectId(run_id)},
             {"$set": {
                 "status": "failed",
                 "error": str(e),
@@ -358,35 +358,35 @@ async def init_arq():
     app.state.arq_pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
 
 # In the API route
-@router.post("/workflows/{workflow_id}/run")
-async def run_workflow(workflow_id: str, request: Request):
-    job_doc = {
-        "workflow_id": ObjectId(workflow_id),
+@router.post("/pipelines/{pipeline_id}/run")
+async def run_pipeline(pipeline_id: str, request: Request):
+    run_doc = {
+        "pipeline_id": ObjectId(pipeline_id),
         "status": "queued",
         "created_at": datetime.utcnow(),
         "attempt": 0,
         "input": await request.json(),
     }
-    result = await db.plumber.jobs.insert_one(job_doc)
-    job_id = str(result.inserted_id)
+    result = await db.plumber.runs.insert_one(run_doc)
+    run_id = str(result.inserted_id)
 
-    # Enqueue into Redis — a worker picks this up instantly
+    # Enqueue into Redis — a lemming picks this up instantly
     await request.app.state.arq_pool.enqueue_job(
-        "execute_workflow", job_id=job_id,
+        "execute_pipeline", run_id=run_id,
     )
-    return {"job_id": job_id, "status": "queued"}
+    return {"run_id": run_id, "status": "queued"}
 ```
 
 ---
 
-## Cron / Scheduled Workflows
+## Cron / Scheduled Pipelines
 
 Schedules are stored in MongoDB. ARQ's built-in cron runs a check every
 minute that scans for due schedules and enqueues them:
 
 ```python
 async def check_schedules(ctx: dict):
-    """ARQ cron job — runs every minute. Finds due schedules, enqueues jobs."""
+    """ARQ cron — runs every minute. Finds due schedules, enqueues runs."""
     db = ctx["db"]
     now = datetime.utcnow()
     pool = ctx["redis"]  # ARQ provides this
@@ -395,18 +395,18 @@ async def check_schedules(ctx: dict):
         "enabled": True,
         "next_run_at": {"$lte": now},
     }):
-        # Create job doc
-        job_doc = {
-            "workflow_id": schedule["workflow_id"],
+        # Create run doc
+        run_doc = {
+            "pipeline_id": schedule["pipeline_id"],
             "status": "queued",
             "created_at": now,
             "attempt": 0,
             "tags": schedule.get("tags", []),
         }
-        result = await db.plumber.jobs.insert_one(job_doc)
+        result = await db.plumber.runs.insert_one(run_doc)
 
         # Enqueue
-        await pool.enqueue_job("execute_workflow", job_id=str(result.inserted_id))
+        await pool.enqueue_job("execute_pipeline", run_id=str(result.inserted_id))
 
         # Advance next_run_at
         next_run = compute_next_run(schedule["cron_expression"], now)
@@ -418,20 +418,20 @@ async def check_schedules(ctx: dict):
 
 ---
 
-## Worker Identity & Logging
+## Lemming Identity & Logging
 
-Every worker process generates a unique identity at startup:
+Every lemming process generates a unique identity at startup:
 
 ```python
-worker_id = f"{hostname}:{pid}:{uuid4().hex[:8]}"
-# e.g. "prod-worker-02:48291:a3f1c9e2"
+lemming_id = f"{hostname}:{pid}:{uuid4().hex[:8]}"
+# e.g. "prod-lemming-02:48291:a3f1c9e2"
 ```
 
 This ID is:
-- Stored in `worker_id` on every claimed job document.
-- Included in every log entry the worker emits.
-- Written to every `plumber.job_logs` document.
-- Registered in `plumber.workers` collection with heartbeat timestamps.
+- Stored in `lemming_id` on every claimed run document.
+- Included in every log entry the lemming emits.
+- Written to every `plumber.run_logs` document.
+- Registered in `plumber.lemmings` collection with heartbeat timestamps.
 
 ### Structured Log Format
 
@@ -441,67 +441,67 @@ All log output uses structured JSON logging:
 {
   "ts": "2026-03-06T14:22:03.112Z",
   "level": "info",
-  "worker_id": "prod-worker-02:48291:a3f1c9e2",
-  "job_id": "660a1f...",
-  "workflow": "daily-news-import",
-  "node": "fetch-rss",
-  "msg": "Node completed",
+  "lemming_id": "prod-lemming-02:48291:a3f1c9e2",
+  "run_id": "660a1f...",
+  "pipeline": "daily-news-import",
+  "block": "fetch-rss",
+  "msg": "Block completed",
   "duration_ms": 342
 }
 ```
 
-### Job Log Collection
+### Run Log Collection
 
-In addition to stdout/stderr, every node execution writes to `plumber.job_logs`:
+In addition to stdout/stderr, every block execution writes to `plumber.run_logs`:
 
 ```javascript
 {
   _id: ObjectId,
-  job_id: ObjectId,
-  worker_id: "prod-worker-02:48291:a3f1c9e2",
-  node_id: "fetch-rss",
-  node_type: "rss_reader",
+  run_id: ObjectId,
+  lemming_id: "prod-lemming-02:48291:a3f1c9e2",
+  block_id: "fetch-rss",
+  block_type: "rss_reader",
   ts: ISODate,
   level: "info" | "warning" | "error",
-  msg: "Fetched 42 items from https://...",
+  msg: "Fetched 42 parcels from https://...",
   duration_ms: 342,
-  output_summary: { item_count: 42 },
+  output_summary: { parcel_count: 42 },
 }
 ```
 
 This makes it trivial to answer:
-- "Which worker ran job X?" → `db.plumber.jobs.findOne({_id: X}).worker_id`
-- "What did job X do?" → `db.plumber.job_logs.find({job_id: X}).sort({ts: 1})`
-- "What is worker Y doing?" → `db.plumber.jobs.find({worker_id: Y, status: "running"})`
-- "Is worker Y alive?" → `db.plumber.workers.findOne({worker_id: Y})`
+- "Which lemming ran run X?" → `db.plumber.runs.findOne({_id: X}).lemming_id`
+- "What did run X do?" → `db.plumber.run_logs.find({run_id: X}).sort({ts: 1})`
+- "What is lemming Y doing?" → `db.plumber.runs.find({lemming_id: Y, status: "running"})`
+- "Is lemming Y alive?" → `db.plumber.lemmings.findOne({lemming_id: Y})`
 
 ---
 
 ## Real-Time UI Updates (via Redis Pub/Sub)
 
-When a worker updates a job's status, it also publishes to a Redis channel.
+When a lemming updates a run's status, it also publishes to a Redis channel.
 The UI server subscribes and pushes updates to the browser via WebSocket:
 
 ```python
-# Worker side — after status change
-await redis.publish("plumber:job_updates", json.dumps({
-    "job_id": job_id,
+# Lemming side — after status change
+await redis.publish("plumber:run_updates", json.dumps({
+    "run_id": run_id,
     "status": "completed",
-    "worker_id": worker_id,
+    "lemming_id": lemming_id,
 }))
 
 # UI side — WebSocket endpoint
-@router.websocket("/ws/jobs")
-async def job_updates_ws(websocket: WebSocket):
+@router.websocket("/ws/runs")
+async def run_updates_ws(websocket: WebSocket):
     await websocket.accept()
     pubsub = redis.pubsub()
-    await pubsub.subscribe("plumber:job_updates")
+    await pubsub.subscribe("plumber:run_updates")
     async for message in pubsub.listen():
         if message["type"] == "message":
             await websocket.send_text(message["data"])
 ```
 
-No polling needed — the UI updates the moment a job changes state.
+No polling needed — the UI updates the moment a run changes state.
 
 ---
 
@@ -512,24 +512,25 @@ single `APIRouter` so they can be mounted at any prefix.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/workflows` | List workflows |
-| `POST` | `/api/workflows` | Create workflow |
-| `GET` | `/api/workflows/{id}` | Get workflow detail |
-| `PUT` | `/api/workflows/{id}` | Update workflow |
-| `DELETE` | `/api/workflows/{id}` | Delete workflow |
-| `POST` | `/api/workflows/{id}/run` | Trigger a job (writes to MongoDB + enqueues via ARQ) |
-| `GET` | `/api/jobs` | List jobs (filterable by status, workflow, date) |
-| `GET` | `/api/jobs/{id}` | Get job detail + node states |
-| `GET` | `/api/jobs/{id}/logs` | Get job execution logs |
-| `POST` | `/api/jobs/{id}/cancel` | Cancel a pending/running job |
-| `POST` | `/api/jobs/{id}/retry` | Retry a failed job |
+| `GET` | `/api/pipelines` | List pipelines |
+| `POST` | `/api/pipelines` | Create pipeline |
+| `GET` | `/api/pipelines/{id}` | Get pipeline detail |
+| `PUT` | `/api/pipelines/{id}` | Update pipeline |
+| `DELETE` | `/api/pipelines/{id}` | Delete pipeline |
+| `POST` | `/api/pipelines/{id}/run` | Trigger a run (writes to MongoDB + enqueues via ARQ) |
+| `GET` | `/api/runs` | List runs (filterable by status, pipeline, date) |
+| `GET` | `/api/runs/{id}` | Get run detail + block states |
+| `GET` | `/api/runs/{id}/logs` | Get run execution logs |
+| `POST` | `/api/runs/{id}/cancel` | Cancel a pending/running run |
+| `POST` | `/api/runs/{id}/retry` | Retry a failed run |
 | `GET` | `/api/schedules` | List schedules |
 | `POST` | `/api/schedules` | Create schedule |
 | `PUT` | `/api/schedules/{id}` | Update schedule |
 | `DELETE` | `/api/schedules/{id}` | Delete schedule |
-| `GET` | `/api/workers` | List active workers (from `plumber.workers` collection) |
+| `GET` | `/api/blocks` | List all registered block types from the catalog |
+| `GET` | `/api/lemmings` | List active lemmings (from `plumber.lemmings` collection) |
 | `GET` | `/api/health` | Health check (MongoDB + Redis connectivity) |
-| `WS` | `/ws/jobs` | Real-time job status updates via WebSocket |
+| `WS` | `/ws/runs` | Real-time run status updates via WebSocket |
 
 ---
 
@@ -548,9 +549,9 @@ PLUMBER_REDIS_URL=redis://localhost:6379/0
 # Mode
 PLUMBER_MODE=all                # all | ui | worker
 
-# Worker
-PLUMBER_WORKER_CONCURRENCY=4    # concurrent job slots per worker process
-PLUMBER_JOB_TIMEOUT=3600        # max seconds per job
+# Lemming
+PLUMBER_LEMMING_CONCURRENCY=4   # concurrent run slots per lemming process
+PLUMBER_RUN_TIMEOUT=3600        # max seconds per run
 PLUMBER_HEALTH_CHECK_INTERVAL=30
 
 # API
@@ -575,31 +576,154 @@ llming_plumber/                  # the installable package
 ├── __init__.py              # create_app() factory
 ├── config.py                # Settings (pydantic-settings, reads .env)
 ├── models/
-│   ├── workflow.py          # Workflow, Node, Edge
-│   ├── job.py               # Job, NodeState
+│   ├── pipeline.py          # Pipeline, Block, Pipe
+│   ├── run.py               # Run, BlockState
 │   ├── schedule.py          # Schedule
-│   └── log.py               # JobLog
+│   └── log.py               # RunLog
 ├── api/
 │   ├── __init__.py          # router aggregation
-│   ├── workflows.py
-│   ├── jobs.py
+│   ├── pipelines.py
+│   ├── runs.py
 │   ├── schedules.py
-│   ├── workers.py
+│   ├── lemmings.py
 │   └── ws.py                # WebSocket endpoint for real-time updates
 ├── worker/
-│   ├── __init__.py          # WorkerSettings for ARQ
-│   ├── executor.py          # execute_workflow task + node runner
+│   ├── __init__.py          # LemmingSettings for ARQ
+│   ├── executor.py          # execute_pipeline task + block runner
 │   └── scheduler.py         # check_schedules cron task
-├── nodes/                   # Building-block implementations
-│   ├── base.py              # BaseNode interface
-│   ├── http_request.py
-│   ├── rss_reader.py
-│   ├── send_email.py
-│   ├── weather.py
-│   └── ...
+├── blocks/                  # Building-block implementations
+│   ├── base.py              # BaseBlock, BlockInput, BlockOutput, BlockContext
+│   ├── core/                # Generic building blocks
+│   │   └── http_request.py
+│   ├── weather/             # Weather data blocks
+│   │   ├── openweathermap.py
+│   │   └── dwd.py
+│   ├── news/                # News & feeds
+│   │   ├── rss_reader.py
+│   │   ├── tagesschau.py
+│   │   └── news_api.py
+│   └── government/          # German public data (bund.dev)
+│       ├── autobahn.py
+│       └── pegel_online.py
+├── mcp/                     # MCP tool generation (blocks & pipelines → MCP tools)
+│   ├── __init__.py
+│   ├── adapter.py           # blocks_to_mcp_tools(), pipeline_to_mcp_tool()
+│   └── server.py            # MCP server entrypoint
 ├── db.py                    # MongoDB + Redis connection helpers
 └── cli.py                   # `llming-plumber serve --mode=...`
+                             # `llming-plumber mcp serve --blocks ...`
 ```
+
+---
+
+## API Response Caching
+
+External APIs like OpenWeatherMap and NewsAPI have rate limits and/or
+per-request costs. During development, running the same test 50 times
+in a row should not burn through the entire daily quota.
+
+### Design
+
+Blocks that call rate-limited external APIs use a **transparent response
+cache** backed by Redis. The cache key is derived from the block type +
+a hash of the input parameters (e.g. city, query, date range). Identical
+requests return the cached response instead of hitting the external API.
+
+```
+  Block.execute(input)
+       │
+       ▼
+  ┌──────────────┐    cache hit     ┌────────────┐
+  │ Cache lookup │ ───────────────► │ Return     │
+  │ (Redis)      │                  │ cached     │
+  └──────┬───────┘                  └────────────┘
+         │ cache miss
+         ▼
+  ┌──────────────┐
+  │ Call external│
+  │ API          │
+  └──────┬───────┘
+         │
+         ▼
+  ┌──────────────┐
+  │ Store in     │
+  │ cache + TTL  │
+  └──────────────┘
+```
+
+### Cache Modes
+
+Controlled via the `PLUMBER_API_CACHE` environment variable:
+
+| Value | Behavior | Use case |
+|---|---|---|
+| `on` (default) | Cache enabled, responses stored with a per-block TTL (capped at `PLUMBER_API_CACHE_MAX_TTL`) | Local development, manual testing |
+| `off` | Cache fully disabled, every call hits the real API | CI full integration tests, production |
+| `aggressive` | Cache enabled with longer TTLs (24h), ignores max TTL cap | Rapid local iteration, offline-friendly |
+
+### Max TTL
+
+Even with caching on, responses are **never cached forever**. A global
+max TTL caps how long any cached response can live, regardless of the
+per-block setting:
+
+```bash
+PLUMBER_API_CACHE_MAX_TTL=1800   # 30 minutes (default)
+```
+
+The effective TTL for any cached response is:
+```
+effective_ttl = min(block.cache_ttl, PLUMBER_API_CACHE_MAX_TTL)
+```
+
+In `aggressive` mode the max TTL cap is ignored and per-block TTLs are
+multiplied by 10 (e.g. weather 10min → 100min, news 15min → 150min),
+but still never exceed 24 hours.
+
+### Per-Block TTL
+
+Each block declares its own default cache TTL:
+
+```python
+class WeatherBlock(BaseBlock[WeatherInput, WeatherOutput]):
+    block_type = "weather"
+    cache_ttl = 600          # 10 minutes — weather doesn't change that fast
+    ...
+
+class NewsApiBlock(BaseBlock[NewsInput, NewsOutput]):
+    block_type = "news_api"
+    cache_ttl = 900          # 15 minutes — headlines don't refresh every second
+    ...
+
+class HttpRequestBlock(BaseBlock[HttpInput, HttpOutput]):
+    block_type = "http_request"
+    cache_ttl = 0            # no caching — generic HTTP is too unpredictable
+    ...
+```
+
+### Cache Key
+
+```python
+cache_key = f"plumber:cache:{block_type}:{hashlib.sha256(input.model_dump_json().encode()).hexdigest()}"
+```
+
+Same block type + same input = same cache key. Changing any input
+parameter (different city, different query) produces a different key.
+
+### Test Configuration
+
+```bash
+# .env for local development — cache on by default
+PLUMBER_API_CACHE=on
+
+# pytest CI config — cache off, test real behavior
+# (set in CI environment or conftest.py)
+PLUMBER_API_CACHE=off
+```
+
+In `conftest.py`, tests that need real API responses set `PLUMBER_API_CACHE=off`.
+Tests that just validate block logic mock the HTTP layer entirely and
+don't touch the cache at all.
 
 ---
 
@@ -607,15 +731,16 @@ llming_plumber/                  # the installable package
 
 | Concern | Solution |
 |---|---|
-| Persistent storage | MongoDB — workflows, jobs, logs, credentials, schedules |
-| Job dispatch | ARQ + Redis — push-based, instant delivery, no polling |
-| Exactly-once execution | ARQ's atomic Redis operations — only one worker gets each job |
+| Persistent storage | MongoDB — pipelines, runs, logs, credentials, schedules |
+| Run dispatch | ARQ + Redis — push-based, instant delivery, no polling |
+| Exactly-once execution | ARQ's atomic Redis operations — only one lemming gets each run |
 | Retries | ARQ built-in retry with configurable count and backoff |
 | Cron scheduling | ARQ `cron_jobs` triggers `check_schedules` every minute |
 | Embeddable | `create_app()` factory + mountable `APIRouter` |
 | Deployment flexibility | Three modes: `all`, `ui`, `worker` — controlled by one env var |
-| Horizontal scaling | N worker processes/servers, all consuming from the same Redis queue |
-| Crash recovery | ARQ detects dead workers via `health_check_interval`, re-queues jobs |
+| Horizontal scaling | N lemming processes/servers, all consuming from the same Redis queue |
+| Crash recovery | ARQ detects dead lemmings via `health_check_interval`, re-queues runs |
 | Real-time UI | Redis pub/sub → WebSocket, no polling |
-| Audit trail | `worker_id` on every job + append-only `job_logs` collection |
-| Structured logging | JSON logs with `worker_id`, `job_id`, `node_id` on every line |
+| Audit trail | `lemming_id` on every run + append-only `run_logs` collection |
+| Structured logging | JSON logs with `lemming_id`, `run_id`, `block_id` on every line |
+| API rate limit protection | Redis response cache with per-block TTL, disabled in CI |

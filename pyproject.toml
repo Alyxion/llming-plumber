@@ -5,6 +5,11 @@ requires-python = ">=3.13"
 license = "AGPL-3.0-or-later"
 dependencies = [
     "fastapi[standard]",
+    "httpx",
+    "feedparser",
+    "pydantic>=2.0",
+    "beautifulsoup4",
+    "jsonpath-ng",
 ]
 
 [project.scripts]
@@ -13,6 +18,26 @@ llming-plumber = "llming_plumber.cli:main"
 [project.optional-dependencies]
 dev = [
     "pytest",
-    "httpx",
+    "pytest-asyncio",
+    "pytest-cov",
+    "respx",
     "ruff",
+    "mypy",
+    "types-beautifulsoup4",
 ]
+
+[tool.setuptools.packages.find]
+include = ["llming_plumber*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.mypy]
+strict = true
+plugins = ["pydantic.mypy"]
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
