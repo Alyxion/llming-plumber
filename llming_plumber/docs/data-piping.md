@@ -399,6 +399,67 @@ or "HtmlBatchExtractor" that internally loop over lists. Iteration belongs
 in the executor/graph, not inside blocks. Blocks process one item at a time.
 The executor handles fan-out, concurrency, error isolation, and collection.
 
+#### How Fan-Out Works in the Executor
+
+Fan-out is driven by `BaseBlock.fan_out_field` — a class variable naming
+the output field whose list items become individual parcels:
+
+```python
+class SplitBlock(BaseBlock[SplitInput, SplitOutput]):
+    fan_out_field: ClassVar[str | None] = "items"
+```
+
+When the executor sees a block with `fan_out_field`, it:
+1. Executes the block normally.
+2. Takes the list from `output.items` and creates one `Parcel` per item.
+3. Downstream blocks run once per parcel (in batches with concurrency).
+
+Fan-in is the inverse — `BaseBlock.fan_in = True` tells the executor to
+gather all upstream parcels into a single `items` list before executing:
+
+```python
+class CollectBlock(BaseBlock[CollectInput, CollectOutput]):
+    fan_in: ClassVar[bool] = True
+```
+
+#### Range Block for Numeric Iteration
+
+The Range block generates `[{index: 0}, {index: 1}, ...]` for numeric
+loops. Combined with fan-out, it creates loop-like iteration:
+
+```
+[Range(0..10)] ──items──► [Log("Item #{index}")] ──► [Collect] ──items──► [Excel Builder]
+```
+
+The Range block computes `len(range(...))` before allocating the list
+to prevent OOM attacks — `range(0, 999999999)` is rejected at the size
+check, not after allocating ~8 GB.
+
+#### Accumulation Patterns
+
+Results from fan-out iterations can be collected and condensed into
+documents:
+
+```
+[Range] → [fan-out] → [Process] → [Collect] → [Excel Builder]
+                                             → [PDF Builder]
+```
+
+The Collect block outputs `{items: [...]}`. Document builders like
+Excel Builder accept either structured `sheets` definitions or a simple
+`rows` list — the `rows` convenience field auto-creates a single sheet
+from collected items.
+
+#### Fan-Out Safety Limits
+
+| Limit | Default | Env var |
+|---|---|---|
+| Max items | 10,000 | `PLUMBER_MAX_FAN_OUT_ITEMS` |
+| Batch size | 200 | `PLUMBER_FAN_OUT_BATCH_SIZE` |
+| Default concurrency | 10 | `PLUMBER_DEFAULT_FAN_OUT_CONCURRENCY` |
+
+Wall-clock timeout (`MAX_RUN_WALL_SECONDS`) is checked between batches.
+
 ### 5. Enrichment (add attachments)
 
 ```
@@ -469,6 +530,64 @@ and sends it down the matching branch.
     field_schema: { summary, title }
     mime_types: []
   config: { to: "team@example.com", subject_template: "Report: {title}" }
+```
+
+---
+
+## Safe Expression Evaluator
+
+Blocks like **Text Template** and **Log** support `{expression}` placeholders
+in their text fields. These are evaluated via a restricted Python evaluator
+(`llming_plumber/blocks/core/safe_eval.py`) that prevents code injection.
+
+### Allowed Constructs
+
+- **Arithmetic:** `+`, `-`, `*`, `/`, `//`, `%`, `**`
+- **Comparisons:** `==`, `!=`, `<`, `<=`, `>`, `>=`
+- **Boolean logic:** `and`, `or`, `not`, ternary (`x if cond else y`)
+- **Subscript:** `data["key"]`, `items[0]`
+- **Literals:** strings, ints, floats, bools, `None`, lists, tuples, dicts
+- **Whitelisted functions:** `str`, `int`, `float`, `bool`, `len`, `abs`,
+  `min`, `max`, `round`
+- **Variables:** passed in from piped fields or block config
+
+### Blocked Constructs
+
+- No imports, no attribute access, no `eval`/`exec`
+- No method calls (`"abc".upper()` is rejected)
+- No assignment, no loops, no function definitions
+
+### Resource Guards
+
+| Guard | Limit |
+|---|---|
+| Expression length | 1,000 chars |
+| String result | 10,000 chars |
+| Numeric result | ±10^15 |
+| Power exponent | 100 |
+| String/list repeat | 1,000 |
+| Template length | 50,000 chars |
+| Expressions per template | 100 |
+| NaN / Infinity | Rejected |
+
+### Template Syntax
+
+```
+Hello {name}, your score is {score * 100}%!
+Use {{ and }} for literal braces.
+```
+
+Blocks that accept templates use Pydantic's `extra="allow"` on their input
+model, so dynamically piped fields from upstream blocks become available
+as template variables alongside explicit configuration values.
+
+### Usage in Code
+
+```python
+from llming_plumber.blocks.core.safe_eval import safe_eval, render_template
+
+safe_eval("index + 1", {"index": 3})          # → 4
+render_template("Row {index}: {name}", {"index": 0, "name": "Alice"})  # → "Row 0: Alice"
 ```
 
 ---

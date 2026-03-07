@@ -54,6 +54,37 @@ All data structures are Pydantic models. No raw dicts crossing function boundari
 - `Schedule`, `Credential` — configuration
 - `BlockInput`, `BlockOutput` — fitting data flowing between blocks
 
+## Resource Limits
+
+All resource budgets are centralised in `llming_plumber/blocks/limits.py`.
+Every constant can be overridden via an environment variable prefixed with
+`PLUMBER_`, e.g. `PLUMBER_MAX_FILE_BYTES=104857600`.
+
+| Category | Constant | Default | Purpose |
+|---|---|---|---|
+| File I/O | `MAX_FILE_BYTES` | 50 MB | Max file loaded into memory |
+| File I/O | `MAX_BASE64_INPUT_BYTES` | 70 MB | Max base64 payload accepted |
+| Lists | `MAX_LIST_ITEMS` | 100,000 | Max items in list-processing blocks |
+| Lists | `MAX_RECORDS` | 500,000 | Max rows from CSV/Excel/Parquet |
+| Fan-out | `MAX_FAN_OUT_ITEMS` | 10,000 | Max items a split/range can fan out |
+| Fan-out | `FAN_OUT_BATCH_SIZE` | 200 | Batch size for fan-out execution |
+| Fan-out | `DEFAULT_FAN_OUT_CONCURRENCY` | 10 | Concurrent tasks during fan-out |
+| Timeout | `MAX_RUN_WALL_SECONDS` | 3,600 | Hard wall-clock limit per run |
+| Timeout | `MAX_WAIT_SECONDS` | 300 | Max seconds for a wait block |
+| Documents | `MAX_PAGES` | 500 | Max pages for PDF/PPTX |
+| Documents | `MAX_SHEETS` | 50 | Max sheets in Excel |
+| Documents | `MAX_ROWS_PER_SHEET` | 200,000 | Max rows per Excel sheet |
+| Documents | `MAX_SLIDES` | 200 | Max PowerPoint slides |
+| Logging | `MAX_RUN_LOG_ENTRIES` | 50 | Max log entries per run in MongoDB |
+| Logging | `LOG_BLOCK_OUTPUT` | off | Whether to persist block output data |
+| Debug | `DEBUG_TTL_SECONDS` | 3,600 | TTL for debug trace keys in Redis |
+| Console | `CONSOLE_TTL_SECONDS` | 3,600 | TTL for console entries in Redis |
+| Console | `CONSOLE_MAX_ENTRIES` | 5,000 | Max console entries per run |
+
+Validation helpers (`check_file_size`, `check_list_size`, `check_page_count`,
+etc.) raise `ResourceLimitError` with a clear message including the limit
+name and env var override.
+
 ## Block (Plugin) Architecture
 
 Every block is **self-contained** in a single module under `llming_plumber/blocks/`. A block consists of:
@@ -106,7 +137,59 @@ print(f"{result.temp}°C, {result.condition}")
 
 This makes every block reusable as a plain Python library — embed the weather block in a website widget, use the RSS reader in a CLI script, or call the email sender from a Jupyter notebook.
 
-The block must **never assume it's running inside a pipeline**. `BlockContext` is optional and only provides pipeline-level features (logging, credential lookup) when present. This means:
+### Fan-Out and Fan-In
+
+Blocks declare iteration behaviour via class variables:
+
+```python
+class SplitBlock(BaseBlock[SplitInput, SplitOutput]):
+    fan_out_field: ClassVar[str | None] = "items"  # executor fans out this list
+
+class CollectBlock(BaseBlock[CollectInput, CollectOutput]):
+    fan_in: ClassVar[bool] = True  # executor gathers upstream parcels first
+```
+
+The executor handles all iteration — blocks never loop internally. See
+[Data Piping — Iteration](data-piping.md#4-iteration-list--per-item-branch-execution).
+
+### BlockContext and Run Console
+
+`BlockContext` provides runtime information and the run console:
+
+```python
+class BlockContext(BaseModel):
+    run_id: str = ""
+    pipeline_id: str = ""
+    block_id: str = ""
+    console: Any = Field(default=None, exclude=True)
+
+    async def log(self, message: str, *, level: str = "info") -> None:
+        """Write to the run console. No-ops when running standalone."""
+```
+
+Blocks write to the per-run console via `await ctx.log("Processing...")`.
+The console is backed by Redis and accessible via the API. It gracefully
+no-ops when `ctx` is `None` or Redis is unavailable.
+
+### Safe Expression Interpolation
+
+Blocks that accept user-facing text with dynamic values (Log, Text Template)
+use the safe expression evaluator from `blocks/core/safe_eval.py`. Input
+models use `ConfigDict(extra="allow")` to accept dynamically piped fields
+alongside explicit config:
+
+```python
+class LogInput(BlockInput):
+    model_config = ConfigDict(extra="allow")
+    message: str
+    level: str = "info"
+```
+
+The `{expression}` syntax in messages is rendered via `render_template()`,
+which uses `safe_eval()` — no `eval()`, no code injection. See
+[Data Piping — Safe Expression Evaluator](data-piping.md#safe-expression-evaluator).
+
+The block must **never assume it's running inside a pipeline**. `BlockContext` is optional and only provides pipeline-level features (logging, credential lookup, console) when present. This means:
 
 - No imports from `llming_plumber.worker`, `llming_plumber.db`, or `llming_plumber.api` inside block code.
 - Configuration (API keys, URLs) comes via the input model, not from environment variables or global config. When running inside Plumber, the executor resolves credentials and injects them into the input.

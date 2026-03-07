@@ -124,44 +124,68 @@ observability/      — dashboards, logs, alerting
 | # | Block | Categories | Purpose |
 |---|-------|------------|---------|
 | 33 | **If / Switch (Conditional)** | `core/flow` | Branch workflow based on conditions — route by country, order value, product line, customer tier. |
-| 34 | **Loop / Iterator** | `core/flow` | Process a list of items one by one — line items in an order, batch of emails, list of products to check. |
-| 35 | **Merge / Join** | `core/flow` | Combine data from multiple branches or sources — enrich an order with CRM data and stock levels. |
-| 36 | **Data Mapper / Transformer (JSON, XML)** | `core/transform` | Reshape, filter, and map data between different formats and schemas. The glue between every system. |
-| 37 | **Code Block (Python / JS)** | `core/transform` | Run custom logic when visual nodes aren't enough — unit conversions, calculations, business rules. |
-| 38 | **Error Handler / Retry** | `core/flow` | Catch failures, retry with backoff, send alerts. Essential for production-grade workflows. |
-| 39 | **Wait / Delay / Human Approval** | `core/flow` | Pause a workflow for a timer or until a human approves (purchase orders above threshold, new supplier onboarding). |
+| 34 | **Split** | `core/flow` | Fan-out — take a list and re-run downstream blocks once per item. Uses `fan_out_field` on `BaseBlock`. |
+| 35 | **Collect** | `core/flow` | Fan-in — gather all upstream parcels back into a single list. Uses `fan_in` on `BaseBlock`. |
+| 36 | **Range** | `core/flow` | Generate a numbered sequence (`[{index: 0}, {index: 1}, ...]`) for iteration, like Python's `range()`. Fans out via `fan_out_field = "items"`. |
+| 37 | **Wait** | `core/flow` | Async sleep, capped at `MAX_WAIT_SECONDS` (default 300s). For rate limiting, polling intervals, or staged execution. |
+| 38 | **Log** | `core/flow` | Write a message to the run console via `ctx.log()`. Supports `{expression}` interpolation with piped variables. |
+| 39 | **Text Template** | `core/transform` | Render templates with `{expression}` placeholders using the safe expression evaluator. Accepts piped fields as variables. |
+| 40 | **Merge / Join** | `core/flow` | Combine data from multiple branches or sources — enrich an order with CRM data and stock levels. |
+| 41 | **Data Mapper / Transformer (JSON, XML)** | `core/transform` | Reshape, filter, and map data between different formats and schemas. The glue between every system. |
+| 42 | **Code Block (Python / JS)** | `core/transform` | Run custom logic when visual nodes aren't enough — unit conversions, calculations, business rules. |
+| 43 | **Error Handler / Retry** | `core/flow` | Catch failures, retry with backoff, send alerts. Essential for production-grade workflows. |
+| 44 | **Wait / Delay / Human Approval** | `core/flow` | Pause a workflow for a timer or until a human approves (purchase orders above threshold, new supplier onboarding). |
+
+### Fan-Out / Fan-In Patterns
+
+The **Split** and **Collect** blocks (together with **Range**) enable
+iteration without building batch variants of blocks:
+
+```
+[Range(0..5)] ──items──► [Log("Processing #{index}")] ──► [Collect] ──items──► [Excel Builder]
+```
+
+- **Range** generates `[{index: 0}, ..., {index: 4}]` and fans out.
+- Each downstream block runs once per item (Log writes to the console).
+- **Collect** gathers all results back into a single list.
+- The list can be piped into document builders (Excel, PDF, etc.).
+
+Fan-out is bounded by `MAX_FAN_OUT_ITEMS` (default 10,000) and processed
+in batches of `FAN_OUT_BATCH_SIZE` (200) with configurable concurrency
+(`DEFAULT_FAN_OUT_CONCURRENCY` = 10). Wall-clock timeout applies between
+batches.
 
 ## 9 — AI & Analytics
 
 | # | Block | Categories | Purpose |
 |---|-------|------------|---------|
-| 40 | **LLM / Chat Completion (OpenAI, Anthropic, local)** | `ai` | Summarize documents, classify emails, extract data from unstructured text, draft responses. |
-| 41 | **Embedding / Vector Search** | `ai` | Semantic search over product documentation, technical specs, past customer tickets. |
-| 42 | **OCR / Document AI** | `ai`, `documents/parsing` | Extract text and fields from scanned documents — incoming invoices, delivery notes, certificates. |
-| 43 | **Translation** | `ai` | Auto-translate emails, documents, support tickets across DE/EN/FR/ES/ZH for global operations. |
+| 45 | **LLM / Chat Completion (OpenAI, Anthropic, local)** | `ai` | Summarize documents, classify emails, extract data from unstructured text, draft responses. |
+| 46 | **Embedding / Vector Search** | `ai` | Semantic search over product documentation, technical specs, past customer tickets. |
+| 47 | **OCR / Document AI** | `ai`, `documents/parsing` | Extract text and fields from scanned documents — incoming invoices, delivery notes, certificates. |
+| 48 | **Translation** | `ai` | Auto-translate emails, documents, support tickets across DE/EN/FR/ES/ZH for global operations. |
 
 ## 10 — Project Management & Ticketing
 
 | # | Block | Categories | Purpose |
 |---|-------|------------|---------|
-| 44 | **Jira** | `project` | Create/update issues, sync with development workflows. For engineering and IT teams. |
-| 45 | **Generic Ticketing (Zendesk, Freshdesk, ServiceNow)** | `project` | Customer support ticket management — create, update, escalate, close. |
-| 46 | **Todoist / Asana / Trello** | `project` | Lightweight task management for non-engineering teams (marketing campaigns, trade show planning). |
+| 49 | **Jira** | `project` | Create/update issues, sync with development workflows. For engineering and IT teams. |
+| 50 | **Generic Ticketing (Zendesk, Freshdesk, ServiceNow)** | `project` | Customer support ticket management — create, update, escalate, close. |
+| 51 | **Todoist / Asana / Trello** | `project` | Lightweight task management for non-engineering teams (marketing campaigns, trade show planning). |
 
 ## 11 — Authentication & Security
 
 | # | Block | Categories | Purpose |
 |---|-------|------------|---------|
-| 47 | **OAuth2 / API Key Manager** | `auth` | Centralized credential store for all connected services. Handles token refresh, rotation, scoping. |
-| 48 | **LDAP / Active Directory** | `auth` | Look up users, validate roles, sync groups. For workflows that need to check who can approve what. |
+| 52 | **OAuth2 / API Key Manager** | `auth` | Centralized credential store for all connected services. Handles token refresh, rotation, scoping. |
+| 53 | **LDAP / Active Directory** | `auth` | Look up users, validate roles, sync groups. For workflows that need to check who can approve what. |
 
 ## 12 — Reporting & Observability
 
 | # | Block | Categories | Purpose |
 |---|-------|------------|---------|
-| 49 | **Dashboard / KPI Widget** | `observability` | Display live workflow metrics — runs per day, error rate, average processing time. |
-| 50 | **Audit Log** | `observability` | Immutable record of every workflow run, every data transformation, every approval. Required for ISO 9001 and regulated industries (pharma, food). |
-| 51 | **Alerting (PagerDuty / Opsgenie / Email)** | `observability`, `communication/email` | Escalate critical failures to on-call staff — SAP sync broken, order stuck, sensor offline. |
+| 54 | **Dashboard / KPI Widget** | `observability` | Display live workflow metrics — runs per day, error rate, average processing time. |
+| 55 | **Audit Log** | `observability` | Immutable record of every workflow run, every data transformation, every approval. Required for ISO 9001 and regulated industries (pharma, food). |
+| 56 | **Alerting (PagerDuty / Opsgenie / Email)** | `observability`, `communication/email` | Escalate critical failures to on-call staff — SAP sync broken, order stuck, sensor offline. |
 
 ## 13 — German Government & Public Data (bund.dev)
 
@@ -192,8 +216,9 @@ Full catalog at [bund.dev](https://bund.dev/apis) / [github.com/bundesAPI](https
 ## Priority Tiers for Implementation
 
 **Tier 1 — Build first (can't run without these):**
-Cron, Webhook, REST API, Email Send/Receive, Conditional, Loop, Data Mapper,
-Code Block, Error Handler, Audit Log, OAuth2 Manager
+Cron, Webhook, REST API, Email Send/Receive, Conditional, Split, Collect,
+Range, Wait, Log, Text Template, Data Mapper, Code Block, Error Handler,
+Audit Log, OAuth2 Manager
 
 **Tier 2 — High value (cover 80% of real workflows):**
 SAP Connector, SQL Database, SharePoint, Microsoft Teams, Excel/CSV Parser,

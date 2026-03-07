@@ -223,9 +223,11 @@ db.plumber.schedules.createIndex({ enabled: 1 })
 
   // Execution
   current_block: "block-id" | null,
-  block_states: { "block-id": { status, output, error, duration_ms } },
+  block_states: { "block-id": { status, duration_ms, error? } },
   input: { ... },               // trigger payload
-  output: { ... } | null,       // final result
+
+  // Debug mode — enables Redis debug trace (see Debug Trace section)
+  debug: false,
 
   // Retry
   attempt: 1,
@@ -452,7 +454,9 @@ All log output uses structured JSON logging:
 
 ### Run Log Collection
 
-In addition to stdout/stderr, every block execution writes to `plumber.run_logs`:
+In addition to stdout/stderr, every block execution writes to `plumber.run_logs`.
+Logging is capped by `_RunLogger` — at most `MAX_RUN_LOG_ENTRIES` (default 50)
+entries per run. Error-level entries are always written regardless of the cap.
 
 ```javascript
 {
@@ -465,7 +469,7 @@ In addition to stdout/stderr, every block execution writes to `plumber.run_logs`
   level: "info" | "warning" | "error",
   msg: "Fetched 42 parcels from https://...",
   duration_ms: 342,
-  output_summary: { parcel_count: 42 },
+  output_summary: null,  // only set when PLUMBER_LOG_BLOCK_OUTPUT=1
 }
 ```
 
@@ -474,6 +478,143 @@ This makes it trivial to answer:
 - "What did run X do?" → `db.plumber.run_logs.find({run_id: X}).sort({ts: 1})`
 - "What is lemming Y doing?" → `db.plumber.runs.find({lemming_id: Y, status: "running"})`
 - "Is lemming Y alive?" → `db.plumber.lemmings.findOne({lemming_id: Y})`
+
+---
+
+## Data Protection Defaults
+
+Block output data may contain private or sensitive information. To prevent
+accidental leakage into MongoDB, the executor applies these defaults:
+
+- **`LOG_BLOCK_OUTPUT`** (env: `PLUMBER_LOG_BLOCK_OUTPUT`, default `0`) —
+  block output is **not** written to `block_states` or `run_logs` unless
+  explicitly opted in. Only status, timing, and errors are persisted.
+- **`_RunLogger`** caps log writes to `MAX_RUN_LOG_ENTRIES` per run
+  (default 50). Error entries are always written.
+- **Error messages** are truncated to `MAX_ERROR_MESSAGE_LENGTH` (default
+  2000 chars) before writing to MongoDB.
+
+To opt in to output logging for debugging:
+
+```bash
+PLUMBER_LOG_BLOCK_OUTPUT=1
+```
+
+For production inspection of intermediate data, use the debug trace
+system (Redis, short-lived TTL) instead of persisting to MongoDB.
+
+---
+
+## Run Console
+
+Every pipeline run has a virtual console that blocks can write to via
+`ctx.log("message")`. The console is backed by a Redis list with automatic
+TTL cleanup.
+
+```
+Redis key: plumber:console:{run_id}
+```
+
+### Writing
+
+Blocks call `await ctx.log("Processing item 42")` during execution.
+The `BlockContext.log()` method delegates to `RunConsole.write()`, which
+appends a JSON entry to the Redis list using a pipeline of
+`RPUSH + LTRIM + EXPIRE` for atomicity.
+
+Each entry contains: `ts`, `block_id`, `level`, `msg`.
+
+### Reading
+
+```python
+from llming_plumber.worker.console import read_console
+
+entries = await read_console(redis, run_id, offset=0, limit=200)
+# → [{"ts": "...", "block_id": "log-1", "level": "info", "msg": "Hello"}, ...]
+```
+
+### Limits
+
+| Setting | Default | Env var |
+|---|---|---|
+| TTL | 1 hour | `PLUMBER_CONSOLE_TTL_SECONDS` |
+| Max entries | 5000 | `PLUMBER_CONSOLE_MAX_ENTRIES` |
+
+The console is designed for real-time inspection and short-term review.
+Entries auto-expire after the TTL.
+
+---
+
+## Debug Trace
+
+When a run has `debug: true`, every block execution writes a lightweight
+summary to Redis so users can inspect intermediate data flow after the fact.
+All debug keys auto-expire via `DEBUG_TTL_SECONDS` (default 1 hour).
+
+### Redis Key Layout
+
+```
+plumber:debug:{run_id}:order              → JSON list of block UIDs (exec order)
+plumber:debug:{run_id}:{block_uid}        → JSON block summary (timing, status, parcel count)
+plumber:debug:{run_id}:{block_uid}:g      → JSON list of item glimpses (short labels)
+plumber:debug:{run_id}:{block_uid}:p:{i}  → JSON parcel detail (full fields, truncated)
+```
+
+### What Gets Stored
+
+- **Execution order** — the topological order blocks ran in.
+- **Block summaries** — type, duration, parcel count, status, error.
+- **Glimpses** — short human-readable labels extracted from parcel fields
+  (looks for `name`, `filename`, `title`, `url`, `id`, etc.). Up to
+  `DEBUG_MAX_GLIMPSES` (200) per block.
+- **Parcel detail** — full field data for the first `DEBUG_MAX_PARCELS`
+  (20) parcels, with large values truncated to `DEBUG_MAX_PARCEL_BYTES`
+  (100 KB) per parcel.
+
+### Reading Debug Data
+
+```python
+from llming_plumber.worker.debug_trace import (
+    get_debug_trace,
+    get_debug_parcel,
+    search_debug_parcels,
+)
+
+# Full trace overview
+trace = await get_debug_trace(redis, run_id)
+# → {"run_id": "...", "order": [...], "blocks": {...}}
+
+# Single parcel detail
+parcel = await get_debug_parcel(redis, run_id, "block-uid", index=0)
+
+# Search glimpses by label
+results = await search_debug_parcels(redis, run_id, "block-uid", label_contains="report")
+```
+
+### Limits
+
+| Setting | Default | Env var |
+|---|---|---|
+| TTL | 1 hour | `PLUMBER_DEBUG_TTL_SECONDS` |
+| Max glimpses per block | 200 | `PLUMBER_DEBUG_MAX_GLIMPSES` |
+| Max parcels with detail | 20 | `PLUMBER_DEBUG_MAX_PARCELS` |
+| Max parcel JSON size | 100 KB | `PLUMBER_DEBUG_MAX_PARCEL_BYTES` |
+
+---
+
+## Wall-Clock Timeout
+
+The executor enforces a hard wall-clock limit on every pipeline run
+via `MAX_RUN_WALL_SECONDS` (default 3600 = 1 hour, env:
+`PLUMBER_MAX_RUN_WALL_SECONDS`).
+
+The timeout is checked:
+1. **Before each block** starts executing.
+2. **Between fan-out batches** during iteration.
+
+When the limit is exceeded, a `ResourceLimitError` is raised and the run
+fails with a clear error message. This prevents infinite loops and
+runaway pipelines from consuming resources indefinitely.
 
 ---
 
@@ -521,6 +662,9 @@ single `APIRouter` so they can be mounted at any prefix.
 | `GET` | `/api/runs` | List runs (filterable by status, pipeline, date) |
 | `GET` | `/api/runs/{id}` | Get run detail + block states |
 | `GET` | `/api/runs/{id}/logs` | Get run execution logs |
+| `GET` | `/api/runs/{id}/console` | Read run console entries (Redis) |
+| `GET` | `/api/runs/{id}/debug` | Get debug trace overview (Redis, requires `debug: true`) |
+| `GET` | `/api/runs/{id}/debug/{block_uid}/{index}` | Get single parcel detail from debug trace |
 | `POST` | `/api/runs/{id}/cancel` | Cancel a pending/running run |
 | `POST` | `/api/runs/{id}/retry` | Retry a failed run |
 | `GET` | `/api/schedules` | List schedules |
@@ -590,11 +734,27 @@ llming_plumber/                  # the installable package
 ├── worker/
 │   ├── __init__.py          # LemmingSettings for ARQ
 │   ├── executor.py          # execute_pipeline task + block runner
+│   ├── console.py           # RunConsole — Redis-backed per-run console
+│   ├── debug_trace.py       # DebugTracer — Redis-backed intermediate data inspector
 │   └── scheduler.py         # check_schedules cron task
 ├── blocks/                  # Building-block implementations
 │   ├── base.py              # BaseBlock, BlockInput, BlockOutput, BlockContext
+│   ├── limits.py            # Resource limits (file size, fan-out, timeouts, …)
+│   ├── registry.py          # BlockRegistry — auto-discovers all block types
 │   ├── core/                # Generic building blocks
-│   │   └── http_request.py
+│   │   ├── http_request.py
+│   │   ├── split.py         # SplitBlock — fan-out over list items
+│   │   ├── collect.py       # CollectBlock — fan-in, gather items into list
+│   │   ├── range_block.py   # RangeBlock — generate numbered sequences
+│   │   ├── wait.py          # WaitBlock — async sleep with cap
+│   │   ├── log.py           # LogBlock — write to run console
+│   │   ├── text_template.py # TextTemplateBlock — safe expression interpolation
+│   │   ├── safe_eval.py     # AST-based restricted expression evaluator
+│   │   └── ...              # filter, sort, merge, aggregate, csv, json, etc.
+│   ├── documents/           # Document generation & parsing
+│   │   ├── excel_builder.py # ExcelBuilderBlock — multi-sheet Excel workbooks
+│   │   ├── pdf_builder.py   # PdfBuilderBlock — PDF generation
+│   │   └── ...              # word, powerpoint, parquet, yaml, readers/writers
 │   ├── weather/             # Weather data blocks
 │   │   ├── openweathermap.py
 │   │   └── dwd.py
@@ -741,6 +901,11 @@ don't touch the cache at all.
 | Horizontal scaling | N lemming processes/servers, all consuming from the same Redis queue |
 | Crash recovery | ARQ detects dead lemmings via `health_check_interval`, re-queues runs |
 | Real-time UI | Redis pub/sub → WebSocket, no polling |
+| Run console | Redis list per run — blocks write via `ctx.log()`, auto-expire after 1h |
+| Debug trace | Redis-backed intermediate data snapshots — glimpses, parcel detail, auto-expire |
+| Data protection | Block output not persisted by default — opt in via `PLUMBER_LOG_BLOCK_OUTPUT` |
+| Resource limits | Centralised `limits.py` — file size, fan-out, timeouts, all env-configurable |
+| Wall-clock timeout | `MAX_RUN_WALL_SECONDS` checked between blocks and fan-out batches |
 | Audit trail | `lemming_id` on every run + append-only `run_logs` collection |
 | Structured logging | JSON logs with `lemming_id`, `run_id`, `block_id` on every line |
 | API rate limit protection | Redis response cache with per-block TTL, disabled in CI |
