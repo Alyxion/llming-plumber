@@ -80,6 +80,30 @@ function isMultilineField(key, prop, val) {
   return false
 }
 
+// ---------- Primary field per block type (opened on double-click) ----------
+
+const PRIMARY_FIELD = {
+  text_template: 'template',
+  llm_chat: 'system_prompt',
+  llm_summarizer: 'text',
+  llm_rewriter: 'text',
+  llm_translator: 'text',
+  llm_classifier: 'text',
+  llm_sentiment: 'text',
+  llm_entity_extractor: 'text',
+  llm_data_extractor: 'text',
+  llm_question_answerer: 'context',
+  filter: 'expression',
+  safe_eval: 'expression',
+  static_data: 'content',
+  json_transformer: 'expression',
+  jsonpath: 'expression',
+  regex_extractor: 'pattern',
+  log: 'message',
+  http_request: 'url',
+  html_extractor: 'selector',
+}
+
 // ---------- UID helper ----------
 
 let _uid = 0
@@ -189,15 +213,22 @@ function blocksToNodes(blocks) {
     sourcePosition: Position.Right, targetPosition: Position.Left,
   }))
 }
-function pipesToEdges(pipes) {
-  return pipes.map(p => ({
-    id: p.uid, source: p.source_block_uid, target: p.target_block_uid,
-    sourceHandle: p.source_fitting_uid, targetHandle: p.target_fitting_uid,
-    animated: false,
-    data: { field_mapping: p.field_mapping || null },
-    style: { stroke: 'var(--p-edge-default)', strokeWidth: 2 },
-    markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--p-edge-default)' },
-  }))
+function _fmKey(source, target) { return `${source}→${target}` }
+
+function pipesToEdges(pipes, edgeFieldMappings) {
+  return pipes.map(p => {
+    if (p.field_mapping) {
+      const key = _fmKey(p.source_block_uid, p.target_block_uid)
+      edgeFieldMappings[key] = p.field_mapping
+    }
+    return {
+      id: p.uid, source: p.source_block_uid, target: p.target_block_uid,
+      sourceHandle: p.source_fitting_uid, targetHandle: p.target_fitting_uid,
+      type: 'smoothstep', animated: false,
+      style: { stroke: 'var(--p-edge-default)', strokeWidth: 2 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--p-edge-default)' },
+    }
+  })
 }
 function nodesToBlocks(nodes) {
   return nodes.map(n => ({
@@ -206,12 +237,16 @@ function nodesToBlocks(nodes) {
     position: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
   }))
 }
-function edgesToPipes(edges) {
-  return edges.map(e => ({
-    uid: e.id, source_block_uid: e.source, source_fitting_uid: e.sourceHandle || 'output',
-    target_block_uid: e.target, target_fitting_uid: e.targetHandle || 'input',
-    ...(e.data?.field_mapping ? { field_mapping: e.data.field_mapping } : {}),
-  }))
+function edgesToPipes(edges, edgeFieldMappings) {
+  return edges.map(e => {
+    const key = _fmKey(e.source, e.target)
+    const fm = edgeFieldMappings[key]
+    return {
+      uid: e.id, source_block_uid: e.source, source_fitting_uid: e.sourceHandle || 'output',
+      target_block_uid: e.target, target_fitting_uid: e.targetHandle || 'input',
+      ...(fm ? { field_mapping: fm } : {}),
+    }
+  })
 }
 
 // ---------- Pages ----------
@@ -282,13 +317,71 @@ const PipelineEditorPage = defineComponent({
     // Vue Flow state
     const nodes = ref([])
     const edges = ref([])
+    // Field mappings stored outside Vue Flow (it strips edge.data)
+    const edgeFieldMappings = reactive({})
+
+    // --- Undo/Redo history ---
+    const MAX_HISTORY = 100
+    const undoStack = []
+    const redoStack = []
+    let _skipSnapshot = false
+
+    function snapshot() {
+      return JSON.stringify({ nodes: nodes.value, edges: edges.value, edgeFieldMappings: { ...edgeFieldMappings } })
+    }
+    function pushUndo() {
+      if (_skipSnapshot) return
+      const s = snapshot()
+      if (undoStack.length > 0 && undoStack[undoStack.length - 1] === s) return
+      undoStack.push(s)
+      if (undoStack.length > MAX_HISTORY) undoStack.shift()
+      redoStack.length = 0
+    }
+    function restoreSnapshot(s) {
+      _skipSnapshot = true
+      const data = JSON.parse(s)
+      nodes.value = data.nodes
+      edges.value = data.edges
+      // Restore field mappings
+      Object.keys(edgeFieldMappings).forEach(k => delete edgeFieldMappings[k])
+      if (data.edgeFieldMappings) Object.assign(edgeFieldMappings, data.edgeFieldMappings)
+      nextTick(() => { _skipSnapshot = false })
+    }
+    function undo() {
+      if (undoStack.length < 2) return
+      redoStack.push(undoStack.pop())
+      restoreSnapshot(undoStack[undoStack.length - 1])
+    }
+    function redo() {
+      if (redoStack.length === 0) return
+      const s = redoStack.pop()
+      undoStack.push(s)
+      restoreSnapshot(s)
+    }
+
+    // Watch for changes and auto-snapshot (debounced)
+    let _snapTimer = null
+    watch([nodes, edges], () => {
+      if (_skipSnapshot) return
+      clearTimeout(_snapTimer)
+      _snapTimer = setTimeout(pushUndo, 300)
+    }, { deep: true })
+
+    // Keyboard shortcuts
+    function _handleKeyboard(e) {
+      const mod = e.metaKey || e.ctrlKey
+      if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo() }
+      if (mod && e.key === 'z' && e.shiftKey) { e.preventDefault(); redo() }
+      if (mod && e.key === 'y') { e.preventDefault(); redo() }
+    }
+    onMounted(() => document.addEventListener('keydown', _handleKeyboard))
 
     // Run state
     const running = ref(false)
     const runLog = ref([])
     const runOutput = ref(null)
-    const consoleOpen = ref(false)
     const consoleTab = ref('log')
+    const consoleHeight = ref(parseInt(localStorage.getItem('plumber-console-h')) || 180)
 
     // LLM defaults (fetched from API)
     const llmDefaults = ref({ tiers: {}, providers: [], models: {} })
@@ -334,12 +427,50 @@ const PipelineEditorPage = defineComponent({
       if (selectedNodeId.value === nodeId) selectedNodeId.value = null
     }
 
+    function inferFieldMapping(sourceNodeId, targetNodeId) {
+      const sourceNode = nodes.value.find(n => n.id === sourceNodeId)
+      const targetNode = nodes.value.find(n => n.id === targetNodeId)
+      if (!sourceNode || !targetNode) return null
+
+      const srcEntry = catalog.value.find(c => c.block_type === sourceNode.data.blockType)
+      const tgtEntry = catalog.value.find(c => c.block_type === targetNode.data.blockType)
+      if (!srcEntry?.output_schema?.properties || !tgtEntry?.input_schema?.properties) return null
+
+      const srcFields = Object.keys(srcEntry.output_schema.properties)
+      const tgtFields = Object.keys(tgtEntry.input_schema.properties)
+        .filter(k => !isInfraField(k, tgtEntry.input_schema.properties[k]))
+      // Required fields on the target that have no default
+      const tgtRequired = new Set(tgtEntry.input_schema.required || [])
+
+      const mapping = {}
+      for (const tgtField of tgtFields) {
+        if (srcFields.includes(tgtField)) continue // same name — no mapping needed
+        if (!tgtRequired.has(tgtField)) continue // optional — skip
+        // Find a plausible source field by type match (prefer string→string)
+        const tgtProp = tgtEntry.input_schema.properties[tgtField]
+        const candidates = srcFields.filter(sf => {
+          const sp = srcEntry.output_schema.properties[sf]
+          return sp.type === tgtProp.type || tgtProp.type === 'string'
+        })
+        if (candidates.length === 1) {
+          mapping[tgtField] = candidates[0]
+        } else if (candidates.length > 1) {
+          // Heuristic: prefer the "main" output field (first string field)
+          const mainField = candidates.find(c => srcEntry.output_schema.properties[c].type === 'string') || candidates[0]
+          mapping[tgtField] = mainField
+        }
+      }
+      return Object.keys(mapping).length > 0 ? mapping : null
+    }
+
     function onConnect(params) {
       const id = uid()
+      const fm = inferFieldMapping(params.source, params.target)
+      if (fm) edgeFieldMappings[_fmKey(params.source, params.target)] = fm
       edges.value = [...edges.value, {
         id, source: params.source, target: params.target,
         sourceHandle: params.sourceHandle || 'output', targetHandle: params.targetHandle || 'input',
-        animated: false,
+        type: 'smoothstep', animated: false,
         style: { stroke: 'var(--p-edge-default)', strokeWidth: 2 },
         markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--p-edge-default)' },
       }]
@@ -347,6 +478,21 @@ const PipelineEditorPage = defineComponent({
 
     function onNodeClick(event) { selectedNodeId.value = event.node.id }
     function onPaneClick() { selectedNodeId.value = null }
+
+    function onNodeDoubleClick(event) {
+      const node = event.node
+      const primaryKey = PRIMARY_FIELD[node.data.blockType]
+      if (!primaryKey) return
+      const catalogEntry = catalog.value.find(c => c.block_type === node.data.blockType)
+      const prop = catalogEntry?.input_schema?.properties?.[primaryKey]
+      if (!prop) return
+      const val = node.data.config[primaryKey]
+      textModal.value = {
+        nodeId: node.id, key: primaryKey, title: prop.title || primaryKey,
+        value: typeof val === 'object' ? JSON.stringify(val, null, 2) : (val ?? prop.default ?? ''),
+        upstreamFields: getUpstreamFields(node.id),
+      }
+    }
 
     function onDrop(event) {
       event.preventDefault()
@@ -361,10 +507,13 @@ const PipelineEditorPage = defineComponent({
     function loadPreset(preset) {
       pipelineName.value = preset.name
       pipelineId.value = null
+      Object.keys(edgeFieldMappings).forEach(k => delete edgeFieldMappings[k])
       nodes.value = blocksToNodes(preset.blocks)
-      edges.value = pipesToEdges(preset.pipes)
+      edges.value = pipesToEdges(preset.pipes, edgeFieldMappings)
       presetMenuOpen.value = false
       selectedNodeId.value = null
+      undoStack.length = 0; redoStack.length = 0
+      nextTick(pushUndo)
       showStatus(`Loaded preset: ${preset.name}`)
     }
 
@@ -372,7 +521,7 @@ const PipelineEditorPage = defineComponent({
       saving.value = true
       const payload = {
         name: pipelineName.value, blocks: nodesToBlocks(nodes.value),
-        pipes: edgesToPipes(edges.value), owner_id: IMAGINARY_OWNER, owner_type: 'user', tags: [],
+        pipes: edgesToPipes(edges.value, edgeFieldMappings), owner_id: IMAGINARY_OWNER, owner_type: 'user', tags: [],
       }
       try {
         if (pipelineId.value) {
@@ -395,7 +544,9 @@ const PipelineEditorPage = defineComponent({
         pipelineName.value = p.name
         pipelineId.value = p.id || p._id
         nodes.value = blocksToNodes(p.blocks || [])
-        edges.value = pipesToEdges(p.pipes || [])
+        edges.value = pipesToEdges(p.pipes || [], edgeFieldMappings)
+        undoStack.length = 0; redoStack.length = 0
+        nextTick(pushUndo)
       } catch (err) { showStatus(`Failed to load: ${err.message}`) }
     }
 
@@ -404,16 +555,16 @@ const PipelineEditorPage = defineComponent({
       if (node) node.data = { ...node.data, status }
     }
     function resetAllNodeStatuses() {
-      nodes.value = nodes.value.map(n => ({ ...n, data: { ...n.data, status: 'idle' } }))
+      nodes.value = nodes.value.map(n => ({ ...n, data: { ...n.data, status: 'idle', errorFields: [] } }))
     }
 
     async function runPipeline() {
       if (nodes.value.length === 0) { showStatus('No blocks to run'); return }
       running.value = true; runLog.value = []; runOutput.value = null
-      consoleOpen.value = true; consoleTab.value = 'log'
+      consoleTab.value = 'log'
       resetAllNodeStatuses()
 
-      const payload = { name: pipelineName.value, blocks: nodesToBlocks(nodes.value), pipes: edgesToPipes(edges.value) }
+      const payload = { name: pipelineName.value, blocks: nodesToBlocks(nodes.value), pipes: edgesToPipes(edges.value, edgeFieldMappings) }
       try {
         const resp = await fetch('/api/run-inline', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
@@ -463,11 +614,56 @@ const PipelineEditorPage = defineComponent({
             const pc = data.parcel_count > 1 ? ` (${data.parcel_count} parcels)` : ''
             runLog.value.push({ type: 'success', message: `Done: ${data.label} in ${dur}${pc}`, ts, block_uid: data.block_uid, output: data.output })
           } else {
-            runLog.value.push({ type: 'error', message: `Failed: ${data.label} — ${data.error}`, ts, block_uid: data.block_uid })
+            const errorFields = data.error_fields || []
+            const hints = errorFields.map(f => f.hint).filter(Boolean)
+            let msg = data.error
+            if (hints.length) msg += ` — ${hints[0]}`
+
+            // Try to build a quickfix: auto-map missing fields from upstream
+            let quickfix = null
+            const missingFields = errorFields.filter(f => f.message?.includes('required')).map(f => f.field)
+            if (missingFields.length > 0) {
+              const incomingEdges = edges.value.filter(e => e.target === data.block_uid)
+              if (incomingEdges.length > 0) {
+                const fixes = {}
+                for (const mf of missingFields) {
+                  for (const edge of incomingEdges) {
+                    const srcNode = nodes.value.find(n => n.id === edge.source)
+                    if (!srcNode) continue
+                    const srcEntry = catalog.value.find(c => c.block_type === srcNode.data.blockType)
+                    const srcFields = Object.keys(srcEntry?.output_schema?.properties || {})
+                    if (srcFields.length > 0 && !srcFields.includes(mf)) {
+                      // Map the missing target field to the best source field
+                      const match = srcFields.find(sf => srcEntry.output_schema.properties[sf].type === 'string') || srcFields[0]
+                      fixes[mf] = { fmKey: _fmKey(edge.source, edge.target), sourceField: match, sourceLabel: srcNode.data.label }
+                    }
+                  }
+                }
+                if (Object.keys(fixes).length > 0) {
+                  const desc = Object.entries(fixes).map(([tf, v]) => `"${tf}" ← "${v.sourceField}" from ${v.sourceLabel}`).join(', ')
+                  quickfix = { fixes, description: `Auto-fix: map ${desc}` }
+                }
+              }
+            }
+
+            runLog.value.push({
+              type: 'error', message: msg, ts,
+              block_uid: data.block_uid,
+              error_fields: errorFields.map(f => f.field),
+              quickfix,
+            })
+            // Auto-select the failed block
+            selectedNodeId.value = data.block_uid
+            // Mark error fields for highlighting
+            const node = nodes.value.find(n => n.id === data.block_uid)
+            if (node) {
+              node.data = { ...node.data, errorFields: errorFields.map(f => f.field) }
+            }
           }
           break
         case 'error':
-          runLog.value.push({ type: 'error', message: data.message, ts, block_uid: data.block_uid, traceback: data.traceback }); break
+          if (!data.block_uid || data.message === runLog.value[runLog.value.length - 1]?.message) break // skip duplicate
+          runLog.value.push({ type: 'error', message: data.message, ts, block_uid: data.block_uid }); break
         case 'done': {
           const td = data.total_ms < 1000 ? `${data.total_ms}ms` : `${(data.total_ms / 1000).toFixed(1)}s`
           runLog.value.push({ type: 'success', message: `Pipeline complete: ${data.blocks_run} blocks in ${td}`, ts })
@@ -496,7 +692,7 @@ const PipelineEditorPage = defineComponent({
         if (!sourceNode) continue
         const entry = catalog.value.find(c => c.block_type === sourceNode.data.blockType)
         if (!entry?.output_schema?.properties) continue
-        const mapping = edge.data?.field_mapping
+        const mapping = edgeFieldMappings[_fmKey(edge.source, edge.target)] || null
         for (const [fname, fprop] of Object.entries(entry.output_schema.properties)) {
           // If there's a field_mapping, show the mapped name
           let mappedName = fname
@@ -698,10 +894,79 @@ const PipelineEditorPage = defineComponent({
 
         // User-facing config fields
         userKeys.length > 0 ? h('div', { class: 'config-popout__section' },
-          userKeys.map(key => h('div', { key }, [
-            h('div', { class: 'config-label' }, properties[key].title || key),
-            renderField(node, key, properties[key], data.config[key]),
-          ])),
+          userKeys.map(key => {
+            const hasError = (data.errorFields || []).includes(key)
+
+            // Check if this field is "wired" via an incoming pipe mapping
+            let wiredFrom = null
+            let fix = null
+            const incomingEdges = edges.value.filter(e => e.target === node.id)
+            for (const edge of incomingEdges) {
+              const fmk = _fmKey(edge.source, edge.target)
+              const fm = edgeFieldMappings[fmk] || {}
+              const srcNode = nodes.value.find(n => n.id === edge.source)
+              if (!srcNode) continue
+              if (fm[key]) {
+                wiredFrom = { fmKey: fmk, sourceField: fm[key], sourceLabel: srcNode.data.label }
+                break
+              }
+              // Offer fix if field has error and is not wired
+              if (hasError && !fix) {
+                const srcEntry = catalog.value.find(c => c.block_type === srcNode.data.blockType)
+                const srcProps = srcEntry?.output_schema?.properties
+                if (srcProps) {
+                  const srcFields = Object.keys(srcProps)
+                  const tgtType = properties[key]?.type
+                  const match = srcFields.find(sf => srcProps[sf].type === tgtType && !Object.values(fm).includes(sf))
+                    || srcFields.find(sf => !Object.values(fm).includes(sf))
+                  if (match) fix = { fmKey: fmk, sourceField: match, sourceLabel: srcNode.data.label }
+                }
+              }
+            }
+
+            return h('div', { key, class: hasError && !wiredFrom ? 'config-field--error' : '' }, [
+              h('div', { class: 'config-label' }, [
+                properties[key].title || key,
+                hasError && !wiredFrom ? h('span', { class: 'config-field__error-icon material-icons', style: 'font-size:14px; color:var(--p-node-failed); margin-left:4px' }, 'error') : null,
+              ]),
+              // Show wired indicator OR the normal field input
+              wiredFrom
+                ? h('div', { class: 'config-field-wired' }, [
+                    h('span', { class: 'material-icons', style: 'font-size:14px' }, 'cable'),
+                    h('span', null, [
+                      h('strong', null, `{${wiredFrom.sourceField}}`),
+                      ` from ${wiredFrom.sourceLabel}`,
+                    ]),
+                    h('button', {
+                      class: 'config-field-wired__remove',
+                      title: 'Remove mapping (use manual value instead)',
+                      onClick: () => {
+                        const fm = { ...edgeFieldMappings[wiredFrom.fmKey] }
+                        delete fm[key]
+                        if (Object.keys(fm).length === 0) delete edgeFieldMappings[wiredFrom.fmKey]
+                        else edgeFieldMappings[wiredFrom.fmKey] = fm
+                        pushUndo()
+                      },
+                    }, [h('span', { class: 'material-icons', style: 'font-size:12px' }, 'close')]),
+                  ])
+                : renderField(node, key, properties[key], data.config[key]),
+              // Offer fix if field has error and no wire
+              !wiredFrom && fix ? h('button', {
+                class: 'quickfix-inline',
+                onClick: () => {
+                  const existing = edgeFieldMappings[fix.fmKey] || {}
+                  edgeFieldMappings[fix.fmKey] = { ...existing, [key]: fix.sourceField }
+                  const ef = (node.data.errorFields || []).filter(f => f !== key)
+                  node.data = { ...node.data, errorFields: ef }
+                  pushUndo()
+                  showStatus(`Mapped "${key}" ← "${fix.sourceField}" from ${fix.sourceLabel}`)
+                },
+              }, [
+                h('span', { class: 'material-icons', style: 'font-size:13px' }, 'auto_fix_high'),
+                ` Fix: use "${fix.sourceField}" from ${fix.sourceLabel}`,
+              ]) : null,
+            ])
+          }),
         ) : null,
 
         // Output fields
@@ -766,7 +1031,7 @@ const PipelineEditorPage = defineComponent({
       const fields = m.upstreamFields || []
       const hasFields = fields.length > 0
 
-      return h('div', { class: 'text-modal-overlay', onClick: (e) => { if (e.target === e.currentTarget) textModal.value = null } }, [
+      return h('div', { class: 'text-modal-overlay' }, [
         h('div', { class: 'text-modal', style: hasFields ? 'display:flex; flex-direction:row; gap:0' : '' }, [
           // Main editor area
           h('div', { style: 'flex:1; display:flex; flex-direction:column; min-width:0' }, [
@@ -781,7 +1046,8 @@ const PipelineEditorPage = defineComponent({
                   node.data = { ...node.data, config: { ...node.data.config, [m.key]: v } }
                 }
                 textModal.value = null
-              } }, 'Done'),
+              } }, 'Save'),
+              h('button', { class: 'toolbar-btn toolbar-btn--ghost', onClick: () => { textModal.value = null } }, 'Cancel'),
             ]),
             h('textarea', {
               class: 'text-modal__editor',
@@ -822,6 +1088,11 @@ const PipelineEditorPage = defineComponent({
           onInput: (e) => { pipelineName.value = e.target.value },
         }),
         statusMsg.value ? h('span', { style: 'font-size:11px; color:var(--p-text-secondary); margin-left:8px' }, statusMsg.value) : null,
+        // Undo/Redo
+        h('button', { class: 'icon-btn', title: 'Undo (⌘Z)', disabled: undoStack.length < 2, onClick: undo },
+          [h('span', { class: 'material-icons', style: 'font-size:18px' }, 'undo')]),
+        h('button', { class: 'icon-btn', title: 'Redo (⌘⇧Z)', disabled: redoStack.length === 0, onClick: redo },
+          [h('span', { class: 'material-icons', style: 'font-size:18px' }, 'redo')]),
         h('div', { style: 'flex:1' }),
         // Presets
         h('div', { class: 'theme-dropdown' }, [
@@ -847,16 +1118,9 @@ const PipelineEditorPage = defineComponent({
           h('span', { class: 'material-icons', style: 'font-size:16px' }, running.value ? 'hourglass_empty' : 'play_arrow'),
           running.value ? ' Running...' : ' Run',
         ]),
-        runLog.value.length > 0 ? h('button', {
-          class: 'toolbar-btn toolbar-btn--ghost',
-          onClick: () => { consoleOpen.value = !consoleOpen.value },
-        }, [
-          h('span', { class: 'material-icons', style: 'font-size:16px' }, consoleOpen.value ? 'expand_more' : 'expand_less'),
-          ' Console',
-        ]) : null,
       ]),
 
-      // Body: sidebar + canvas (no right panel — config is a popout)
+      // Body: sidebar + main area (canvas + console)
       h('div', { class: 'plumber-body' }, [
         // Sidebar
         h('div', { class: 'plumber-sidebar' }, [
@@ -883,6 +1147,8 @@ const PipelineEditorPage = defineComponent({
           ]),
         ]),
 
+        // Main area: canvas + console
+        h('div', { class: 'plumber-main' }, [
         // Canvas
         h('div', { class: 'plumber-canvas', onDrop: onDrop, onDragover: onDragOver }, [
           nodes.value.length === 0 ? h('div', {
@@ -896,7 +1162,7 @@ const PipelineEditorPage = defineComponent({
           h(VueFlow, {
             nodes: nodes.value, edges: edges.value,
             'onUpdate:modelValue': () => {},
-            onConnect, onNodeClick, onPaneClick,
+            onConnect, onNodeClick, onPaneClick, onNodeDoubleClick,
             onNodesChange: (changes) => {
               for (const c of changes) {
                 if (c.type === 'position' && c.position) {
@@ -907,6 +1173,7 @@ const PipelineEditorPage = defineComponent({
             },
             fitView: true, class: 'vue-flow', style: { width: '100%', height: '100%' },
             defaultEdgeOptions: {
+              type: 'smoothstep',
               style: { stroke: 'var(--p-edge-default)', strokeWidth: 2 },
               markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--p-edge-default)' },
             },
@@ -915,7 +1182,9 @@ const PipelineEditorPage = defineComponent({
               const d = props.data, status = d.status || 'idle'
               const isSelected = selectedNodeId.value === props.id
               const sc = { running: 'var(--p-node-running)', completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', idle: 'var(--p-node-idle)' }
+              const HandleComp = Vue.resolveComponent('Handle')
               return h('div', { class: ['block-node', `block-node--${status}`, isSelected && 'block-node--selected'] }, [
+                h(HandleComp, { type: 'target', position: Position.Left, id: 'input', class: 'block-handle' }),
                 h('div', { class: 'block-node__status', style: { background: sc[status] || sc.idle } }),
                 h('div', { class: 'block-node__content' }, [
                   h('span', { class: 'material-icons block-node__icon' }, blockIcon(d.blockType)),
@@ -924,6 +1193,7 @@ const PipelineEditorPage = defineComponent({
                     h('div', { class: 'block-node__type' }, d.blockType),
                   ]),
                 ]),
+                h(HandleComp, { type: 'source', position: Position.Right, id: 'output', class: 'block-handle' }),
               ])
             },
           }),
@@ -931,39 +1201,93 @@ const PipelineEditorPage = defineComponent({
           // Config popout (floating over canvas)
           renderConfigPopout(),
         ]),
-      ]),
 
-      // Console
-      consoleOpen.value && runLog.value.length > 0 ? h('div', { class: 'run-console' }, [
+      // Console — always visible, resizable like VS Code terminal
+      h('div', { class: 'run-console', style: { height: `${consoleHeight.value}px` } }, [
+        // Resize handle
+        h('div', {
+          class: 'run-console__resize',
+          onMousedown: (e) => {
+            e.preventDefault()
+            const startY = e.clientY
+            const startH = consoleHeight.value
+            const onMove = (ev) => {
+              const newH = Math.max(60, Math.min(600, startH - (ev.clientY - startY)))
+              consoleHeight.value = newH
+            }
+            const onUp = () => {
+              document.removeEventListener('mousemove', onMove)
+              document.removeEventListener('mouseup', onUp)
+              localStorage.setItem('plumber-console-h', String(consoleHeight.value))
+            }
+            document.addEventListener('mousemove', onMove)
+            document.addEventListener('mouseup', onUp)
+          },
+        }),
         h('div', { class: 'run-console__tabs' }, [
-          h('button', { class: ['run-console__tab', consoleTab.value === 'log' && 'run-console__tab--active'], onClick: () => { consoleTab.value = 'log' } }, `Log (${runLog.value.length})`),
-          h('button', { class: ['run-console__tab', consoleTab.value === 'output' && 'run-console__tab--active'], onClick: () => { consoleTab.value = 'output' } }, 'Output'),
+          h('button', { class: ['run-console__tab', consoleTab.value === 'log' && 'run-console__tab--active'], onClick: () => { consoleTab.value = 'log' } }, [
+            h('span', { class: 'material-icons', style: 'font-size:13px' }, 'terminal'),
+            ` Log${runLog.value.length ? ` (${runLog.value.length})` : ''}`,
+          ]),
+          h('button', { class: ['run-console__tab', consoleTab.value === 'output' && 'run-console__tab--active'], onClick: () => { consoleTab.value = 'output' } }, [
+            h('span', { class: 'material-icons', style: 'font-size:13px' }, 'data_object'),
+            ' Output',
+          ]),
           h('div', { style: 'flex:1' }),
-          h('button', { class: 'icon-btn', title: 'Clear', onClick: () => { runLog.value = []; runOutput.value = null; consoleOpen.value = false; resetAllNodeStatuses() } },
-            [h('span', { class: 'material-icons', style: 'font-size:14px' }, 'delete_sweep')]),
-          h('button', { class: 'icon-btn', title: 'Close', onClick: () => { consoleOpen.value = false } },
-            [h('span', { class: 'material-icons', style: 'font-size:14px' }, 'close')]),
+          runLog.value.length > 0 ? h('button', { class: 'icon-btn', title: 'Clear', onClick: () => { runLog.value = []; runOutput.value = null; resetAllNodeStatuses() } },
+            [h('span', { class: 'material-icons', style: 'font-size:14px' }, 'delete_sweep')]) : null,
         ]),
         consoleTab.value === 'log'
-          ? h('div', { class: 'run-console__log' }, runLog.value.map((entry, i) => {
-              const icons = { info: 'info', success: 'check_circle', error: 'error' }
-              const colors = { info: 'var(--p-text-secondary)', success: 'var(--p-node-completed)', error: 'var(--p-node-failed)' }
-              return h('div', {
-                key: i, class: 'run-console__entry',
-                onClick: () => { if (entry.block_uid) selectedNodeId.value = entry.block_uid; if (entry.output) { runOutput.value = entry.output; consoleTab.value = 'output' } },
-                style: entry.block_uid ? 'cursor:pointer' : '',
-              }, [
-                h('span', { class: 'material-icons', style: `font-size:14px; color:${colors[entry.type]}; flex-shrink:0` }, icons[entry.type] || 'info'),
-                h('span', { class: 'run-console__time' }, entry.ts?.slice(11, 19) || ''),
-                h('span', { style: `color:${colors[entry.type] || 'var(--p-text)'}` }, entry.message),
-              ])
-            }))
+          ? h('div', { class: 'run-console__log' },
+              runLog.value.length === 0
+                ? [h('div', { style: 'color:var(--p-text-secondary); padding:16px; text-align:center; font-size:12px' }, 'Run a pipeline to see output here')]
+                : runLog.value.map((entry, i) => {
+                    const icons = { info: 'info', success: 'check_circle', error: 'error' }
+                    const colors = { info: 'var(--p-text-secondary)', success: 'var(--p-node-completed)', error: 'var(--p-node-failed)' }
+                    return h('div', {
+                      key: i, class: 'run-console__entry',
+                      onClick: () => {
+                        if (entry.block_uid) {
+                          selectedNodeId.value = entry.block_uid
+                          if (entry.error_fields?.length) {
+                            const node = nodes.value.find(n => n.id === entry.block_uid)
+                            if (node) node.data = { ...node.data, errorFields: entry.error_fields }
+                          }
+                        }
+                        if (entry.output) { runOutput.value = entry.output; consoleTab.value = 'output' }
+                      },
+                      style: entry.block_uid ? 'cursor:pointer' : '',
+                    }, [
+                      h('span', { class: 'material-icons', style: `font-size:14px; color:${colors[entry.type]}; flex-shrink:0` }, icons[entry.type] || 'info'),
+                      h('span', { class: 'run-console__time' }, entry.ts?.slice(11, 19) || ''),
+                      h('span', { style: `color:${colors[entry.type] || 'var(--p-text)'}; flex:1` }, entry.message),
+                      entry.quickfix ? h('button', {
+                        class: 'quickfix-btn',
+                        title: entry.quickfix.description,
+                        onClick: (ev) => {
+                          ev.stopPropagation()
+                          for (const [targetField, fix] of Object.entries(entry.quickfix.fixes)) {
+                            const existing = edgeFieldMappings[fix.fmKey] || {}
+                            edgeFieldMappings[fix.fmKey] = { ...existing, [targetField]: fix.sourceField }
+                          }
+                          pushUndo()
+                          showStatus('Applied field mapping fix — try running again')
+                        },
+                      }, [
+                        h('span', { class: 'material-icons', style: 'font-size:13px' }, 'auto_fix_high'),
+                        ' Fix',
+                      ]) : null,
+                    ])
+                  }),
+            )
           : h('div', { class: 'run-console__output' }, [
               runOutput.value
                 ? h('pre', { class: 'run-console__json' }, JSON.stringify(runOutput.value, null, 2))
-                : h('div', { style: 'color:var(--p-text-secondary); padding:16px; text-align:center' }, 'No output yet'),
+                : h('div', { style: 'color:var(--p-text-secondary); padding:16px; text-align:center; font-size:12px' }, 'No output yet'),
             ]),
-      ]) : null,
+      ]), // close console
+      ]), // close plumber-main
+      ]), // close plumber-body
 
       // Text editor modal
       renderTextModal(),

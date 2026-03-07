@@ -199,17 +199,20 @@ async def _run_pipeline_stream(
 
         except Exception as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
+            error_info = _humanize_error(exc, block_def.label)
             yield _sse("block_done", {
                 "block_uid": block_uid,
                 "block_type": block_def.block_type,
                 "label": block_def.label,
                 "duration_ms": round(elapsed_ms, 1),
                 "status": "failed",
-                "error": str(exc)[:500],
+                "error": error_info["message"],
+                "error_fields": error_info.get("fields", []),
             })
             yield _sse("error", {
                 "block_uid": block_uid,
-                "message": str(exc)[:500],
+                "message": error_info["message"],
+                "error_fields": error_info.get("fields", []),
                 "traceback": traceback.format_exc()[-1000:],
             })
             return
@@ -227,6 +230,45 @@ async def _run_pipeline_stream(
         "blocks_run": len(order),
         "output": final_output,
     })
+
+
+def _humanize_error(exc: Exception, block_label: str) -> dict[str, Any]:
+    """Convert exceptions into human-readable messages with field info."""
+    from pydantic import ValidationError
+
+    if isinstance(exc, ValidationError):
+        fields: list[dict[str, str]] = []
+        parts: list[str] = []
+        for err in exc.errors():
+            loc = err.get("loc", ())
+            field_name = str(loc[-1]) if loc else "unknown"
+            err_type = err.get("type", "")
+            if err_type == "missing":
+                parts.append(f'"{field_name}" is required but has no value')
+                hint = "Connect a pipe to this input, or set a value in the block config"
+            elif err_type == "string_type":
+                parts.append(f'"{field_name}" expects text but got a different type')
+                hint = "Check that the upstream block outputs the correct type"
+            elif "type" in err_type:
+                expected = err.get("msg", "")
+                parts.append(f'"{field_name}": {expected}')
+                hint = "Check the field value or upstream connection"
+            else:
+                msg = err.get("msg", str(err_type))
+                parts.append(f'"{field_name}": {msg}')
+                hint = ""
+            fields.append({"field": field_name, "message": parts[-1], "hint": hint})
+        message = f"{block_label}: {'; '.join(parts)}"
+        return {"message": message, "fields": fields}
+
+    if isinstance(exc, ValueError):
+        return {"message": f"{block_label}: {exc}"}
+
+    msg = str(exc)[:300]
+    # Strip class prefixes like "httpx.HTTPStatusError: ..."
+    if ": " in msg:
+        msg = msg.split(": ", 1)[1]
+    return {"message": f"{block_label}: {msg}"}
 
 
 def _truncate_output(d: dict[str, Any], max_str: int = 500) -> dict[str, Any]:

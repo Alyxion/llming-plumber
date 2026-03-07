@@ -6,13 +6,13 @@
 export const lodgeTheme = {
   id: 'lodge', label: 'Lodge', dark: true,
   colors: {
-    primary: '#003D8F', secondary: '#1A6BC4', accent: '#F59E0B',
-    background: '#151521', surface: '#1D1D2B', 'surface-variant': '#252538',
-    text: '#E8E8F0', 'text-secondary': '#9CA3AF', border: '#2D2D42',
-    'node-running': '#3B82F6', 'node-completed': '#22C55E',
-    'node-failed': '#EF4444', 'node-idle': '#4B5563',
-    'edge-default': '#4B5563', 'edge-active': '#3B82F6',
-    'sidebar-bg': '#1A1A28', 'sidebar-text': '#C9C9D9',
+    primary: '#4a90d0', secondary: '#6db8e8', accent: '#d49a3e',
+    background: '#000a1e', surface: '#0a1628', 'surface-variant': '#0f1e33',
+    text: '#d8e8f4', 'text-secondary': '#7aa0c0', border: 'rgba(60,130,200,0.18)',
+    'node-running': '#6db8e8', 'node-completed': '#34d399',
+    'node-failed': '#f87171', 'node-idle': '#3c6080',
+    'edge-default': '#3c6080', 'edge-active': '#6db8e8',
+    'sidebar-bg': '#040e20', 'sidebar-text': '#b0c8e0',
   },
 }
 
