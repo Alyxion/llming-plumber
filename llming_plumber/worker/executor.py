@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -18,6 +19,11 @@ from llming_plumber.blocks.base import (
     BlockInput,
     BlockOutput,
 )
+from llming_plumber.blocks.limits import (
+    FAN_OUT_BATCH_SIZE,
+    MAX_FAN_OUT_ITEMS,
+    check_list_size,
+)
 from llming_plumber.blocks.registry import BlockRegistry
 from llming_plumber.models.log import RunLog
 from llming_plumber.models.mongo_helpers import model_to_doc
@@ -29,6 +35,8 @@ from llming_plumber.models.pipeline import (
 )
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_CONCURRENCY: int = 10
 
 
 def topological_sort(
@@ -90,6 +98,44 @@ def _get_input_output_types(
     raise TypeError(msg)
 
 
+def _apply_pipe_mapping(
+    pipe: PipeDefinition,
+    source_parcel: Parcel,
+) -> dict[str, Any]:
+    """Extract fields from a source parcel according to a pipe's mapping."""
+    if pipe.field_mapping:
+        mapped: dict[str, Any] = {}
+        for target_field, source_field in pipe.field_mapping.items():
+            if source_field in source_parcel.fields:
+                mapped[target_field] = source_parcel.fields[source_field]
+        return mapped
+    return dict(source_parcel.fields)
+
+
+def _merge_upstream(
+    block_uid: str,
+    incoming_pipes: dict[str, list[PipeDefinition]],
+    parcels: dict[str, list[Parcel]],
+    *,
+    fan_out_parcel: Parcel | None = None,
+    fan_out_source_uid: str | None = None,
+) -> dict[str, Any]:
+    """Merge fields from all upstream parcels into a single dict.
+
+    When *fan_out_parcel* is provided, use it instead of looking up
+    the fan-out source in *parcels*.
+    """
+    merged: dict[str, Any] = {}
+    for pipe in incoming_pipes.get(block_uid, []):
+        if fan_out_parcel and pipe.source_block_uid == fan_out_source_uid:
+            merged.update(_apply_pipe_mapping(pipe, fan_out_parcel))
+        else:
+            src_list = parcels.get(pipe.source_block_uid, [])
+            if src_list:
+                merged.update(_apply_pipe_mapping(pipe, src_list[0]))
+    return merged
+
+
 async def run_blocks(
     pipeline: PipelineDefinition,
     run_id: str,
@@ -98,6 +144,7 @@ async def run_blocks(
 ) -> dict[str, Any]:
     """Execute all blocks in topological order, piping data between them.
 
+    Supports fan-out (split) and fan-in (collect) for iteration.
     Returns the output of the final block as a dict.
     """
     BlockRegistry.discover()
@@ -111,8 +158,8 @@ async def run_blocks(
     for pipe in pipeline.pipes:
         incoming_pipes[pipe.target_block_uid].append(pipe)
 
-    # Parcel store: block_uid -> Parcel produced by that block
-    parcels: dict[str, Parcel] = {}
+    # Parcel store: block_uid -> list of Parcels produced by that block
+    parcels: dict[str, list[Parcel]] = {}
 
     last_output: dict[str, Any] = {}
 
@@ -121,6 +168,9 @@ async def run_blocks(
         block = BlockRegistry.create(block_def.block_type)
         block_cls = type(block)
         input_type, _output_type = _get_input_output_types(block_cls)
+
+        fan_out_field: str | None = getattr(block_cls, "fan_out_field", None)
+        is_fan_in: bool = getattr(block_cls, "fan_in", False)
 
         # Update run: current_block
         await db["runs"].update_one(
@@ -131,22 +181,6 @@ async def run_blocks(
             }},
         )
 
-        # Collect input fields from upstream parcels
-        merged_fields: dict[str, Any] = {}
-        for pipe in incoming_pipes.get(block_uid, []):
-            source_parcel = parcels.get(pipe.source_block_uid)
-            if source_parcel is None:
-                continue
-            if pipe.field_mapping:
-                for target_field, source_field in pipe.field_mapping.items():
-                    if source_field in source_parcel.fields:
-                        merged_fields[target_field] = source_parcel.fields[source_field]
-            else:
-                merged_fields.update(source_parcel.fields)
-
-        # Build input: config values as defaults, piped fields override
-        input_data = input_type(**{**block_def.config, **merged_fields})
-
         ctx = BlockContext(
             run_id=run_id,
             pipeline_id=pipeline.id,
@@ -154,44 +188,52 @@ async def run_blocks(
         )
 
         start = time.monotonic()
+
         try:
-            output = await block.execute(input_data, ctx)
+            if is_fan_in:
+                output_dict = await _execute_fan_in(
+                    block, input_type, block_def, block_uid,
+                    incoming_pipes, parcels, ctx,
+                )
+                parcels[block_uid] = [
+                    Parcel(uid=block_uid, fields=output_dict),
+                ]
+            else:
+                # Check if any upstream produced multiple parcels (fan-out)
+                fan_out_source_uid: str | None = None
+                fan_out_parcels: list[Parcel] = []
+                for pipe in incoming_pipes.get(block_uid, []):
+                    src_list = parcels.get(pipe.source_block_uid, [])
+                    if len(src_list) > 1:
+                        fan_out_source_uid = pipe.source_block_uid
+                        fan_out_parcels = src_list
+                        break
+
+                if fan_out_parcels:
+                    output_dict = await _execute_fan_out_branch(
+                        block, input_type, block_def, block_uid,
+                        incoming_pipes, parcels,
+                        fan_out_source_uid or "",
+                        fan_out_parcels, ctx,
+                    )
+                else:
+                    output_dict = await _execute_single(
+                        block, input_type, block_def, block_uid,
+                        incoming_pipes, parcels, ctx,
+                        fan_out_field=fan_out_field,
+                    )
+
         except Exception as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
-
-            # Write block failure state
-            await db["runs"].update_one(
-                {"_id": ObjectId(run_id)},
-                {
-                    "$set": {
-                        f"block_states.{block_uid}.status": "failed",
-                        f"block_states.{block_uid}.error": str(exc),
-                        f"block_states.{block_uid}.duration_ms": elapsed_ms,
-                    }
-                },
+            await _record_block_failure(
+                db, run_id, lemming_id, block_uid, block_def, elapsed_ms, exc,
             )
-
-            # Write failure log
-            log_entry = RunLog(
-                run_id=run_id,
-                lemming_id=lemming_id,
-                block_id=block_uid,
-                block_type=block_def.block_type,
-                level="error",
-                msg=f"Block failed: {exc}",
-                duration_ms=elapsed_ms,
-            )
-            await db["run_logs"].insert_one(model_to_doc(log_entry))
-
             raise
 
         elapsed_ms = (time.monotonic() - start) * 1000
-
-        # Convert output to parcel
-        output_dict = output.model_dump()
-        parcel = Parcel(uid=block_uid, fields=output_dict)
-        parcels[block_uid] = parcel
-        last_output = output_dict
+        last_output = (
+            parcels[block_uid][0].fields if parcels[block_uid] else {}
+        )
 
         # Write RunLog entry
         log_entry = RunLog(
@@ -202,7 +244,7 @@ async def run_blocks(
             level="info",
             msg="Block completed",
             duration_ms=elapsed_ms,
-            output_summary=output_dict,
+            output_summary=last_output,
         )
         await db["run_logs"].insert_one(model_to_doc(log_entry))
 
@@ -212,13 +254,158 @@ async def run_blocks(
             {
                 "$set": {
                     f"block_states.{block_uid}.status": "completed",
-                    f"block_states.{block_uid}.output": output_dict,
+                    f"block_states.{block_uid}.output": last_output,
                     f"block_states.{block_uid}.duration_ms": elapsed_ms,
                 }
             },
         )
 
     return last_output
+
+
+# ------------------------------------------------------------------
+# Internal helpers
+# ------------------------------------------------------------------
+
+
+async def _execute_single(
+    block: BaseBlock,  # type: ignore[type-arg]
+    input_type: type[BlockInput],
+    block_def: BlockDefinition,
+    block_uid: str,
+    incoming_pipes: dict[str, list[PipeDefinition]],
+    parcels: dict[str, list[Parcel]],
+    ctx: BlockContext,
+    *,
+    fan_out_field: str | None = None,
+) -> dict[str, Any]:
+    """Run a block once with merged upstream fields."""
+    merged = _merge_upstream(block_uid, incoming_pipes, parcels)
+    input_data = input_type(**{**block_def.config, **merged})
+    output = await block.execute(input_data, ctx)
+    output_dict = output.model_dump()
+
+    if fan_out_field and fan_out_field in output_dict:
+        items = output_dict[fan_out_field]
+        check_list_size(
+            items,
+            limit=MAX_FAN_OUT_ITEMS,
+            label=f"Fan-out field '{fan_out_field}' in block '{block_uid}'",
+        )
+        result_parcels: list[Parcel] = []
+        for item in items:
+            if isinstance(item, dict):
+                result_parcels.append(Parcel(uid=block_uid, fields=item))
+            else:
+                result_parcels.append(
+                    Parcel(uid=block_uid, fields={"item": item})
+                )
+        if result_parcels:
+            parcels[block_uid] = result_parcels
+        else:
+            # Empty list → store output as-is (no fan-out occurs)
+            parcels[block_uid] = [Parcel(uid=block_uid, fields=output_dict)]
+    else:
+        parcels[block_uid] = [Parcel(uid=block_uid, fields=output_dict)]
+
+    return output_dict
+
+
+async def _execute_fan_out_branch(
+    block: BaseBlock,  # type: ignore[type-arg]
+    input_type: type[BlockInput],
+    block_def: BlockDefinition,
+    block_uid: str,
+    incoming_pipes: dict[str, list[PipeDefinition]],
+    parcels: dict[str, list[Parcel]],
+    fan_out_source_uid: str,
+    fan_out_parcels: list[Parcel],
+    ctx: BlockContext,
+) -> dict[str, Any]:
+    """Run a block once per fan-out parcel, in batches with concurrency."""
+    check_list_size(
+        fan_out_parcels,
+        limit=MAX_FAN_OUT_ITEMS,
+        label=f"Fan-out for block '{block_uid}'",
+    )
+
+    max_conc = int(block_def.config.pop("_max_concurrency", DEFAULT_MAX_CONCURRENCY))
+    sem = asyncio.Semaphore(max_conc)
+    batch_size = FAN_OUT_BATCH_SIZE
+
+    async def _run_one(src_parcel: Parcel) -> BlockOutput:
+        async with sem:
+            merged = _merge_upstream(
+                block_uid, incoming_pipes, parcels,
+                fan_out_parcel=src_parcel,
+                fan_out_source_uid=fan_out_source_uid,
+            )
+            inp = input_type(**{**block_def.config, **merged})
+            return await block.execute(inp, ctx)
+
+    # Process in batches to avoid creating thousands of coroutines at once
+    all_results: list[BlockOutput] = []
+    for i in range(0, len(fan_out_parcels), batch_size):
+        batch = fan_out_parcels[i : i + batch_size]
+        batch_results = await asyncio.gather(*[_run_one(p) for p in batch])
+        all_results.extend(batch_results)
+
+    parcels[block_uid] = [
+        Parcel(uid=block_uid, fields=r.model_dump()) for r in all_results
+    ]
+    return all_results[0].model_dump() if all_results else {}
+
+
+async def _execute_fan_in(
+    block: BaseBlock,  # type: ignore[type-arg]
+    input_type: type[BlockInput],
+    block_def: BlockDefinition,
+    block_uid: str,
+    incoming_pipes: dict[str, list[PipeDefinition]],
+    parcels: dict[str, list[Parcel]],
+    ctx: BlockContext,
+) -> dict[str, Any]:
+    """Gather all upstream parcels into an ``items`` list and execute once."""
+    all_items: list[dict[str, Any]] = []
+    for pipe in incoming_pipes.get(block_uid, []):
+        for p in parcels.get(pipe.source_block_uid, []):
+            all_items.append(_apply_pipe_mapping(pipe, p))
+
+    input_data = input_type(**{**block_def.config, "items": all_items})
+    output = await block.execute(input_data, ctx)
+    return output.model_dump()
+
+
+async def _record_block_failure(
+    db: Any,
+    run_id: str,
+    lemming_id: str,
+    block_uid: str,
+    block_def: BlockDefinition,
+    elapsed_ms: float,
+    exc: Exception,
+) -> None:
+    """Write failure state and log for a block."""
+    await db["runs"].update_one(
+        {"_id": ObjectId(run_id)},
+        {
+            "$set": {
+                f"block_states.{block_uid}.status": "failed",
+                f"block_states.{block_uid}.error": str(exc),
+                f"block_states.{block_uid}.duration_ms": elapsed_ms,
+            }
+        },
+    )
+    log_entry = RunLog(
+        run_id=run_id,
+        lemming_id=lemming_id,
+        block_id=block_uid,
+        block_type=block_def.block_type,
+        level="error",
+        msg=f"Block failed: {exc}",
+        duration_ms=elapsed_ms,
+    )
+    await db["run_logs"].insert_one(model_to_doc(log_entry))
 
 
 async def _publish_status(

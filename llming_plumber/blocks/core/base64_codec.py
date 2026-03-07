@@ -8,6 +8,7 @@ from typing import ClassVar
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import check_base64_size, check_file_size
 
 
 class Base64CodecInput(BlockInput):
@@ -39,8 +40,10 @@ class Base64CodecBlock(BaseBlock[Base64CodecInput, Base64CodecOutput]):
         self, input: Base64CodecInput, ctx: BlockContext | None = None
     ) -> Base64CodecOutput:
         if input.mode == "encode":
+            check_file_size(len(input.text.encode()), label="Base64 encode input")
             result = base64.b64encode(input.text.encode()).decode()
         elif input.mode == "decode":
+            check_base64_size(input.text, label="Base64 decode input")
             result = base64.b64decode(input.text.encode()).decode()
         else:
             msg = f"Unsupported mode: {input.mode}. Use 'encode' or 'decode'."

@@ -9,6 +9,12 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import (
+    MAX_RECORDS,
+    check_base64_size,
+    check_file_size,
+    check_list_size,
+)
 
 
 class ExcelReaderInput(BlockInput):
@@ -54,7 +60,9 @@ class ExcelReaderBlock(BaseBlock[ExcelReaderInput, ExcelReaderOutput]):
     async def execute(
         self, input: ExcelReaderInput, ctx: BlockContext | None = None
     ) -> ExcelReaderOutput:
+        check_base64_size(input.content, label="Excel file")
         raw = base64.b64decode(input.content)
+        check_file_size(len(raw), label="Excel file")
 
         if input.file_format == "xls":
             return self._read_xls(raw, input)
@@ -123,6 +131,9 @@ class ExcelReaderBlock(BaseBlock[ExcelReaderInput, ExcelReaderOutput]):
             columns = [f"col_{i}" for i in range(num_cols)]
             data_rows = rows_raw
 
+        check_list_size(
+            data_rows, limit=MAX_RECORDS, label="Excel rows",
+        )
         records = [
             dict(zip(columns, row, strict=False)) for row in data_rows
         ]

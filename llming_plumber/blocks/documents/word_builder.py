@@ -13,6 +13,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import BaseModel, Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import MAX_SECTIONS, check_page_count
 
 
 class RunDef(BaseModel):
@@ -185,6 +186,9 @@ class WordBuilderBlock(BaseBlock[WordBuilderInput, WordBuilderOutput]):
             raw = json.loads(input.json_data)
             sections = [SectionDef.model_validate(s) for s in raw]
 
+        check_page_count(
+            len(sections), limit=MAX_SECTIONS, label="Word sections",
+        )
         return self._build_document(
             sections, input.default_font, input.default_font_size
         )

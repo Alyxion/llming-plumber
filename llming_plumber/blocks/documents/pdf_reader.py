@@ -9,6 +9,11 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import (
+    check_base64_size,
+    check_file_size,
+    check_page_count,
+)
 
 
 class PdfReaderInput(BlockInput):
@@ -48,8 +53,11 @@ class PdfReaderBlock(BaseBlock[PdfReaderInput, PdfReaderOutput]):
     ) -> PdfReaderOutput:
         import pdfplumber
 
+        check_base64_size(input.content, label="PDF file")
         raw = base64.b64decode(input.content)
+        check_file_size(len(raw), label="PDF file")
         pdf = pdfplumber.open(io.BytesIO(raw))
+        check_page_count(len(pdf.pages), label="PDF pages")
 
         page_results: list[dict[str, Any]] = []
         all_text_parts: list[str] = []

@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import check_base64_size, check_file_size
 
 
 class WordReaderInput(BlockInput):
@@ -38,7 +39,9 @@ class WordReaderBlock(BaseBlock[WordReaderInput, WordReaderOutput]):
     ) -> WordReaderOutput:
         import docx
 
+        check_base64_size(input.content, label="Word file")
         raw = base64.b64decode(input.content)
+        check_file_size(len(raw), label="Word file")
         doc = docx.Document(io.BytesIO(raw))
 
         paragraphs: list[dict[str, str]] = []

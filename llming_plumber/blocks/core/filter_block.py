@@ -8,6 +8,7 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import check_list_size
 
 
 class FilterInput(BlockInput):
@@ -99,6 +100,7 @@ class FilterBlock(BaseBlock[FilterInput, FilterOutput]):
     async def execute(
         self, input: FilterInput, ctx: BlockContext | None = None
     ) -> FilterOutput:
+        check_list_size(input.items, label="Filter input")
         total = len(input.items)
         filtered = [
             item

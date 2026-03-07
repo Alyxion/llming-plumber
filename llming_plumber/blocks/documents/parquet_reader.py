@@ -9,6 +9,12 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import (
+    MAX_RECORDS,
+    check_base64_size,
+    check_file_size,
+    check_list_size,
+)
 
 
 class ParquetReaderInput(BlockInput):
@@ -43,7 +49,9 @@ class ParquetReaderBlock(BaseBlock[ParquetReaderInput, ParquetReaderOutput]):
     ) -> ParquetReaderOutput:
         import pyarrow.parquet as pq
 
+        check_base64_size(input.content, label="Parquet file")
         raw = base64.b64decode(input.content)
+        check_file_size(len(raw), label="Parquet file")
         table = pq.read_table(
             io.BytesIO(raw),
             columns=input.columns if input.columns else None,
@@ -58,6 +66,7 @@ class ParquetReaderBlock(BaseBlock[ParquetReaderInput, ParquetReaderOutput]):
 
         # Convert columnar dict to list of row dicts
         row_count = table.num_rows
+        check_list_size(row_count, limit=MAX_RECORDS, label="Parquet rows")
         rows: list[dict[str, Any]] = []
         for i in range(row_count):
             rows.append({col: records[col][i] for col in columns})

@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import check_list_size
 
 
 class AggregateInput(BlockInput):
@@ -47,6 +48,7 @@ class AggregateBlock(BaseBlock[AggregateInput, AggregateOutput]):
     async def execute(
         self, input: AggregateInput, ctx: BlockContext | None = None
     ) -> AggregateOutput:
+        check_list_size(input.items, label="Aggregate input")
         values = [
             float(item[input.field])
             for item in input.items

@@ -9,6 +9,12 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import (
+    MAX_SLIDES,
+    check_base64_size,
+    check_file_size,
+    check_page_count,
+)
 
 
 class PowerpointReaderInput(BlockInput):
@@ -38,8 +44,13 @@ class PowerpointReaderBlock(BaseBlock[PowerpointReaderInput, PowerpointReaderOut
     ) -> PowerpointReaderOutput:
         from pptx import Presentation
 
+        check_base64_size(input.content, label="PowerPoint file")
         raw = base64.b64decode(input.content)
+        check_file_size(len(raw), label="PowerPoint file")
         prs = Presentation(io.BytesIO(raw))
+        check_page_count(
+            len(prs.slides), limit=MAX_SLIDES, label="PowerPoint slides",
+        )
 
         all_text_parts: list[str] = []
         slides_data: list[dict[str, Any]] = []

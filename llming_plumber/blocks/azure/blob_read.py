@@ -13,6 +13,7 @@ from llming_plumber.blocks.base import (
     BlockInput,
     BlockOutput,
 )
+from llming_plumber.blocks.limits import check_file_size
 
 
 class BlobReadInput(BlockInput):
@@ -75,6 +76,7 @@ class BlobReadBlock(BaseBlock[BlobReadInput, BlobReadOutput]):
             )
             download = await blob_client.download_blob()
             raw = await download.readall()
+            check_file_size(len(raw), label="Azure blob")
             props = download.properties
 
             if input.encoding == "binary":

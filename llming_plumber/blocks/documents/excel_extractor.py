@@ -22,6 +22,7 @@ from llming_plumber.blocks.documents.excel_builder import (
     ColumnDef,
     SheetDef,
 )
+from llming_plumber.blocks.limits import check_base64_size, check_file_size
 
 
 class ExcelExtractorInput(BlockInput):
@@ -76,7 +77,9 @@ class ExcelExtractorBlock(
 
         import openpyxl
 
+        check_base64_size(input.content, label="Excel file")
         raw = base64.b64decode(input.content)
+        check_file_size(len(raw), label="Excel file")
         wb = openpyxl.load_workbook(
             io.BytesIO(raw), data_only=True
         )

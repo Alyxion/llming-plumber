@@ -13,6 +13,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import BaseModel, Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import MAX_SLIDES, check_page_count
 
 
 class TextStyle(BaseModel):
@@ -212,6 +213,7 @@ class PowerpointBuilderBlock(
             raw = json.loads(input.json_data)
             slides = [SlideDef.model_validate(s) for s in raw]
 
+        check_page_count(len(slides), limit=MAX_SLIDES, label="PowerPoint slides")
         return self._build_presentation(
             slides, input.slide_width, input.slide_height
         )

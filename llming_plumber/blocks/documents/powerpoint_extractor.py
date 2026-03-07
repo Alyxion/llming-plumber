@@ -26,6 +26,12 @@ from llming_plumber.blocks.documents.powerpoint_builder import (
     TextRun,
     TextStyle,
 )
+from llming_plumber.blocks.limits import (
+    MAX_SLIDES,
+    check_base64_size,
+    check_file_size,
+    check_page_count,
+)
 
 
 class PowerpointExtractorInput(BlockInput):
@@ -84,8 +90,13 @@ class PowerpointExtractorBlock(
         from pptx import Presentation
         from pptx.util import Emu
 
+        check_base64_size(input.content, label="PowerPoint file")
         raw = base64.b64decode(input.content)
+        check_file_size(len(raw), label="PowerPoint file")
         prs = Presentation(io.BytesIO(raw))
+        check_page_count(
+            len(prs.slides), limit=MAX_SLIDES, label="PowerPoint slides",
+        )
 
         slides: list[SlideDef] = []
 

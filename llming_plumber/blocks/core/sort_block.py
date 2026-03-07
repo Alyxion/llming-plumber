@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import check_list_size
 
 
 class SortInput(BlockInput):
@@ -41,6 +42,7 @@ class SortBlock(BaseBlock[SortInput, SortOutput]):
     async def execute(
         self, input: SortInput, ctx: BlockContext | None = None
     ) -> SortOutput:
+        check_list_size(input.items, label="Sort input")
         sorted_items = sorted(
             input.items,
             key=lambda item: item.get(input.field, ""),

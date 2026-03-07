@@ -9,6 +9,7 @@ from typing import ClassVar
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import MAX_RECORDS, check_list_size
 
 
 class CsvParserInput(BlockInput):
@@ -47,6 +48,7 @@ class CsvParserBlock(BaseBlock[CsvParserInput, CsvParserOutput]):
     ) -> CsvParserOutput:
         reader = csv.reader(io.StringIO(input.csv_text), delimiter=input.delimiter)
         all_rows = list(reader)
+        check_list_size(all_rows, limit=MAX_RECORDS, label="CSV rows")
 
         if not all_rows:
             return CsvParserOutput(rows=[], column_names=[])

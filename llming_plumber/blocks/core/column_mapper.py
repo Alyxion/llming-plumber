@@ -17,6 +17,7 @@ from llming_plumber.blocks.base import (
     BlockInput,
     BlockOutput,
 )
+from llming_plumber.blocks.limits import check_list_size
 
 
 class ColumnMapperInput(BlockInput):
@@ -74,6 +75,7 @@ class ColumnMapperBlock(
         input: ColumnMapperInput,
         ctx: BlockContext | None = None,
     ) -> ColumnMapperOutput:
+        check_list_size(input.records, label="Column mapper records")
         mapped: list[dict[str, Any]] = []
 
         for record in input.records:

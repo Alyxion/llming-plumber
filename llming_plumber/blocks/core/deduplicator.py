@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import check_list_size
 
 
 class DeduplicatorInput(BlockInput):
@@ -36,6 +37,7 @@ class DeduplicatorBlock(BaseBlock[DeduplicatorInput, DeduplicatorOutput]):
     async def execute(
         self, input: DeduplicatorInput, ctx: BlockContext | None = None
     ) -> DeduplicatorOutput:
+        check_list_size(input.items, label="Deduplicator input")
         seen: set[Any] = set()
         unique: list[dict[str, Any]] = []
         for item in input.items:

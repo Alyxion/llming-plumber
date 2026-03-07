@@ -55,6 +55,11 @@ class BaseBlock[InputT: BlockInput, OutputT: BlockOutput](ABC):
     categories: ClassVar[list[str]] = []
     description: ClassVar[str] = ""
 
+    # Fan-out: output field name whose list items become individual parcels.
+    fan_out_field: ClassVar[str | None] = None
+    # Fan-in: gather all upstream parcels into an ``items`` list input.
+    fan_in: ClassVar[bool] = False
+
     @abstractmethod
     async def execute(self, input: InputT, ctx: BlockContext | None = None) -> OutputT:
         ...

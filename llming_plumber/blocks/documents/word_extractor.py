@@ -21,6 +21,7 @@ from llming_plumber.blocks.base import (
 from llming_plumber.blocks.documents.word_builder import (
     SectionDef,
 )
+from llming_plumber.blocks.limits import check_base64_size, check_file_size
 
 
 class WordExtractorInput(BlockInput):
@@ -66,7 +67,9 @@ class WordExtractorBlock(
 
         import docx
 
+        check_base64_size(input.content, label="Word file")
         raw = base64.b64decode(input.content)
+        check_file_size(len(raw), label="Word file")
         doc = docx.Document(io.BytesIO(raw))
 
         elements: list[dict[str, Any]] = []

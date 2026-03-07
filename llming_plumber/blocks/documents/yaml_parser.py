@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import MAX_FILE_BYTES, ResourceLimitError
 
 
 class YamlParserInput(BlockInput):
@@ -38,6 +39,11 @@ class YamlParserBlock(BaseBlock[YamlParserInput, YamlParserOutput]):
         self, input: YamlParserInput, ctx: BlockContext | None = None
     ) -> YamlParserOutput:
         import yaml
+
+        if len(input.content) > MAX_FILE_BYTES:
+            mb = MAX_FILE_BYTES / (1024 * 1024)
+            msg = f"YAML content is too large (>{mb:.0f} MB)"
+            raise ResourceLimitError(msg)
 
         if input.multi_document:
             docs = list(yaml.safe_load_all(input.content))

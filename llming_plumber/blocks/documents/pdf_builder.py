@@ -15,6 +15,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import BaseModel, Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import MAX_PAGES, check_page_count
 
 
 class FontSpec(BaseModel):
@@ -223,6 +224,7 @@ class PdfBuilderBlock(BaseBlock[PdfBuilderInput, PdfBuilderOutput]):
             raw = json.loads(input.json_data)
             pages = [PageDef.model_validate(p) for p in raw]
 
+        check_page_count(len(pages), limit=MAX_PAGES, label="PDF pages")
         return self._build_pdf(pages, input.mode, input.metadata)
 
     def _build_pdf(

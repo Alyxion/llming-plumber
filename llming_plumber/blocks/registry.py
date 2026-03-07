@@ -52,11 +52,14 @@ def _get_type_args(
 
 
 def _walk_subclasses(cls: type) -> set[type]:
-    """Recursively collect all subclasses of cls."""
+    """Iteratively collect all subclasses of cls (no recursion limit)."""
     result: set[type] = set()
-    for sub in cls.__subclasses__():
-        result.add(sub)
-        result.update(_walk_subclasses(sub))
+    stack = list(cls.__subclasses__())
+    while stack:
+        sub = stack.pop()
+        if sub not in result:
+            result.add(sub)
+            stack.extend(sub.__subclasses__())
     return result
 
 

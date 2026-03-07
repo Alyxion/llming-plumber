@@ -28,6 +28,12 @@ from llming_plumber.blocks.documents.pdf_builder import (
     TextParagraph,
     TextRect,
 )
+from llming_plumber.blocks.limits import (
+    MAX_PAGES,
+    check_base64_size,
+    check_file_size,
+    check_page_count,
+)
 
 
 class PdfExtractorInput(BlockInput):
@@ -87,8 +93,11 @@ class PdfExtractorBlock(
 
         import pdfplumber
 
+        check_base64_size(input.content, label="PDF file")
         raw = base64.b64decode(input.content)
+        check_file_size(len(raw), label="PDF file")
         pdf = pdfplumber.open(io.BytesIO(raw))
+        check_page_count(len(pdf.pages), limit=MAX_PAGES, label="PDF pages")
 
         target_pages = input.pages or list(
             range(1, len(pdf.pages) + 1)

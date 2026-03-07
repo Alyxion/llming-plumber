@@ -9,6 +9,12 @@ from typing import Any, ClassVar, Literal
 from pydantic import BaseModel, Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import (
+    MAX_ROWS_PER_SHEET,
+    MAX_SHEETS,
+    check_list_size,
+    check_page_count,
+)
 
 
 class CellStyle(BaseModel):
@@ -151,6 +157,13 @@ class ExcelBuilderBlock(BaseBlock[ExcelBuilderInput, ExcelBuilderOutput]):
         if not sheets:
             msg = "At least one sheet definition is required"
             raise ValueError(msg)
+
+        check_page_count(len(sheets), limit=MAX_SHEETS, label="Excel sheets")
+        for sheet in sheets:
+            check_list_size(
+                sheet.rows, limit=MAX_ROWS_PER_SHEET,
+                label=f"Excel sheet '{sheet.name}' rows",
+            )
 
         return self._build_workbook(sheets)
 

@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import check_list_size
 
 
 class MergeInput(BlockInput):
@@ -31,6 +32,8 @@ class MergeBlock(BaseBlock[MergeInput, MergeOutput]):
     async def execute(
         self, input: MergeInput, ctx: BlockContext | None = None
     ) -> MergeOutput:
+        total = sum(len(lst) for lst in input.item_lists)
+        check_list_size(total, label="Merge total items")
         merged: list[dict[str, Any]] = []
         for item_list in input.item_lists:
             merged.extend(item_list)

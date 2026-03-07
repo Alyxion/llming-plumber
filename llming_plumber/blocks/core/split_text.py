@@ -7,6 +7,7 @@ from typing import ClassVar
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+from llming_plumber.blocks.limits import check_list_size
 
 
 class SplitTextInput(BlockInput):
@@ -47,4 +48,5 @@ class SplitTextBlock(BaseBlock[SplitTextInput, SplitTextOutput]):
         parts = input.text.split(input.delimiter)
         if input.strip_empty:
             parts = [p for p in parts if p.strip()]
+        check_list_size(parts, label="Split text chunks")
         return SplitTextOutput(chunks=parts, chunk_count=len(parts))
