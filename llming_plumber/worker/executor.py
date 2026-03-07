@@ -25,6 +25,8 @@ from llming_plumber.blocks.limits import (
     MAX_ERROR_MESSAGE_LENGTH,
     MAX_FAN_OUT_ITEMS,
     MAX_RUN_LOG_ENTRIES,
+    MAX_RUN_WALL_SECONDS,
+    ResourceLimitError,
     check_list_size,
 )
 from llming_plumber.blocks.registry import BlockRegistry
@@ -36,6 +38,7 @@ from llming_plumber.models.pipeline import (
     PipeDefinition,
     PipelineDefinition,
 )
+from llming_plumber.worker.console import RunConsole
 from llming_plumber.worker.debug_trace import DebugTracer
 
 logger = logging.getLogger(__name__)
@@ -172,6 +175,7 @@ async def run_blocks(
     lemming_id: str,
     *,
     tracer: DebugTracer | None = None,
+    console: RunConsole | None = None,
 ) -> dict[str, Any]:
     """Execute all blocks in topological order, piping data between them.
 
@@ -183,6 +187,8 @@ async def run_blocks(
     order = topological_sort(pipeline.blocks, pipeline.pipes)
     if tracer is None:
         tracer = DebugTracer(None, run_id, enabled=False)
+    if console is None:
+        console = RunConsole(None, run_id)
 
     block_map: dict[str, BlockDefinition] = {b.uid: b for b in pipeline.blocks}
 
@@ -196,9 +202,19 @@ async def run_blocks(
 
     last_output: dict[str, Any] = {}
     run_logger = _RunLogger(db)
+    run_start = time.monotonic()
     await tracer.record_order(order)
 
     for block_uid in order:
+        # Wall-clock timeout check
+        elapsed_total = time.monotonic() - run_start
+        if elapsed_total > MAX_RUN_WALL_SECONDS:
+            msg = (
+                f"Pipeline exceeded wall-clock limit of "
+                f"{MAX_RUN_WALL_SECONDS}s (ran {elapsed_total:.0f}s)"
+            )
+            raise ResourceLimitError(msg)
+
         block_def = block_map[block_uid]
         block = BlockRegistry.create(block_def.block_type)
         block_cls = type(block)
@@ -220,6 +236,7 @@ async def run_blocks(
             run_id=run_id,
             pipeline_id=pipeline.id,
             block_id=block_uid,
+            console=console,
         )
 
         start = time.monotonic()
@@ -250,6 +267,7 @@ async def run_blocks(
                         incoming_pipes, parcels,
                         fan_out_source_uid or "",
                         fan_out_parcels, ctx,
+                        run_start=run_start,
                     )
                 else:
                     output_dict = await _execute_single(
@@ -376,6 +394,8 @@ async def _execute_fan_out_branch(
     fan_out_source_uid: str,
     fan_out_parcels: list[Parcel],
     ctx: BlockContext,
+    *,
+    run_start: float = 0.0,
 ) -> dict[str, Any]:
     """Run a block once per fan-out parcel, in batches with concurrency."""
     check_list_size(
@@ -401,6 +421,13 @@ async def _execute_fan_out_branch(
     # Process in batches to avoid creating thousands of coroutines at once
     all_results: list[BlockOutput] = []
     for i in range(0, len(fan_out_parcels), batch_size):
+        # Wall-clock check between batches
+        if run_start and time.monotonic() - run_start > MAX_RUN_WALL_SECONDS:
+            msg = (
+                f"Fan-out for '{block_uid}' exceeded wall-clock "
+                f"limit of {MAX_RUN_WALL_SECONDS}s"
+            )
+            raise ResourceLimitError(msg)
         batch = fan_out_parcels[i : i + batch_size]
         batch_results = await asyncio.gather(*[_run_one(p) for p in batch])
         all_results.extend(batch_results)
@@ -533,20 +560,23 @@ async def execute_pipeline(ctx: dict, *, run_id: str) -> dict[str, Any]:  # type
 
     pipeline = doc_to_model(pipeline_doc, PipelineDefinition)
 
-    # Set up debug tracer if the run is flagged for debugging
-    debug_enabled = run_doc.get("debug", False)
+    # Redis is used for console (always) and debug trace (when flagged)
     redis = None
-    if debug_enabled:
-        try:
-            from llming_plumber.db import get_redis
-            redis = get_redis()
-        except Exception:
-            logger.warning("Debug mode requested but Redis unavailable", exc_info=True)
+    try:
+        from llming_plumber.db import get_redis
+        redis = get_redis()
+    except Exception:
+        logger.warning("Redis unavailable — console and debug disabled", exc_info=True)
 
+    console = RunConsole(redis, run_id)
+    debug_enabled = run_doc.get("debug", False)
     tracer = DebugTracer(redis, run_id, enabled=debug_enabled)
 
     try:
-        result = await run_blocks(pipeline, run_id, db, lemming_id, tracer=tracer)
+        result = await run_blocks(
+            pipeline, run_id, db, lemming_id,
+            tracer=tracer, console=console,
+        )
         await db["runs"].update_one(
             {"_id": ObjectId(run_id)},
             {

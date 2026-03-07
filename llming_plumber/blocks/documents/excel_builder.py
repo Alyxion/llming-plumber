@@ -110,9 +110,23 @@ class SheetDef(BaseModel):
 
 class ExcelBuilderInput(BlockInput):
     sheets: list[SheetDef] = Field(
+        default_factory=list,
         title="Sheets",
         description="List of sheet definitions to build into the workbook",
-        min_length=1,
+    )
+    rows: list[dict[str, Any]] = Field(
+        default_factory=list,
+        title="Rows",
+        description=(
+            "Simple mode: provide rows directly and a single sheet "
+            "is created automatically. Useful when piping from a "
+            "collect block."
+        ),
+    )
+    sheet_name: str = Field(
+        default="Sheet1",
+        title="Sheet Name",
+        description="Sheet name when using simple rows mode",
     )
     json_data: str = Field(
         default="",
@@ -150,7 +164,11 @@ class ExcelBuilderBlock(BaseBlock[ExcelBuilderInput, ExcelBuilderOutput]):
         import json
 
         sheets = input.sheets
-        if input.json_data and not any(s.rows for s in sheets):
+
+        # Simple mode: rows piped directly → auto-create a single sheet
+        if not sheets and input.rows:
+            sheets = [SheetDef(name=input.sheet_name, rows=input.rows)]
+        elif input.json_data and not any(s.rows for s in sheets):
             raw = json.loads(input.json_data)
             sheets = [SheetDef.model_validate(s) for s in raw]
 

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import ClassVar
+from typing import Any, ClassVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BlockInput(BaseModel):
@@ -35,11 +35,28 @@ class BlockContext(BaseModel):
     """Runtime context provided by the pipeline executor.
 
     Passed as None when a block runs standalone (outside a pipeline).
+    Blocks can write to the run console via ``await ctx.log("message")``.
     """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     run_id: str = ""
     pipeline_id: str = ""
     block_id: str = ""
+    console: Any = Field(default=None, exclude=True)
+
+    async def log(
+        self,
+        message: str,
+        *,
+        level: str = "info",
+    ) -> None:
+        """Write a message to the run console.
+
+        No-ops gracefully when running standalone (``console is None``).
+        """
+        if self.console is not None:
+            await self.console.write(self.block_id, message, level=level)
 
 
 class BaseBlock[InputT: BlockInput, OutputT: BlockOutput](ABC):

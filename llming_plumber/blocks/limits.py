@@ -56,6 +56,10 @@ DEFAULT_FAN_OUT_CONCURRENCY: int = _env_int("DEFAULT_FAN_OUT_CONCURRENCY", 10)
 FAN_OUT_BATCH_SIZE: int = _env_int("FAN_OUT_BATCH_SIZE", 200)
 """Process fan-out parcels in batches of this size to cap memory."""
 
+MAX_RUN_WALL_SECONDS: int = _env_int("MAX_RUN_WALL_SECONDS", 3600)
+"""Hard wall-clock limit for a single pipeline run (default 1 h).
+The executor checks this after each block completes."""
+
 # ------------------------------------------------------------------
 # Documents
 # ------------------------------------------------------------------
@@ -115,6 +119,19 @@ DEBUG_MAX_PARCELS: int = _env_int("DEBUG_MAX_PARCELS", 20)
 
 DEBUG_MAX_PARCEL_BYTES: int = _env_int("DEBUG_MAX_PARCEL_BYTES", 100_000)
 """Max JSON size in bytes for a single parcel's debug snapshot."""
+
+# ------------------------------------------------------------------
+# Run console (Redis)
+# ------------------------------------------------------------------
+
+CONSOLE_TTL_SECONDS: int = _env_int("CONSOLE_TTL_SECONDS", 3600)
+"""Auto-expire console entries in Redis after this many seconds (default 1 h)."""
+
+CONSOLE_MAX_ENTRIES: int = _env_int("CONSOLE_MAX_ENTRIES", 5000)
+"""Max console entries kept per run (oldest trimmed via LTRIM)."""
+
+MAX_WAIT_SECONDS: int = _env_int("MAX_WAIT_SECONDS", 300)
+"""Maximum seconds a wait block may sleep (default 5 min)."""
 
 # ------------------------------------------------------------------
 # Recursion / depth

@@ -37,7 +37,9 @@ async def test_no_placeholders() -> None:
 
 async def test_missing_key_raises() -> None:
     block = TextTemplateBlock()
-    with pytest.raises(KeyError):
+    from llming_plumber.blocks.core.safe_eval import SafeEvalError
+
+    with pytest.raises(SafeEvalError, match="Unknown variable"):
         await block.execute(
             TextTemplateInput(template="{missing}", values={})
         )
