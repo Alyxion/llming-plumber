@@ -45,6 +45,8 @@ class Run(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
     output: dict[str, Any] | None = None
 
+    debug: bool = False
+
     attempt: int = 0
     max_attempts: int = 3
 

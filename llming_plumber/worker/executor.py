@@ -21,7 +21,10 @@ from llming_plumber.blocks.base import (
 )
 from llming_plumber.blocks.limits import (
     FAN_OUT_BATCH_SIZE,
+    LOG_BLOCK_OUTPUT,
+    MAX_ERROR_MESSAGE_LENGTH,
     MAX_FAN_OUT_ITEMS,
+    MAX_RUN_LOG_ENTRIES,
     check_list_size,
 )
 from llming_plumber.blocks.registry import BlockRegistry
@@ -33,6 +36,7 @@ from llming_plumber.models.pipeline import (
     PipeDefinition,
     PipelineDefinition,
 )
+from llming_plumber.worker.debug_trace import DebugTracer
 
 logger = logging.getLogger(__name__)
 
@@ -136,11 +140,38 @@ def _merge_upstream(
     return merged
 
 
+def _truncate(text: str, max_len: int) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "… (truncated)"
+
+
+class _RunLogger:
+    """Caps the number of log entries written to MongoDB per run.
+
+    Error-level entries are always written regardless of the cap.
+    """
+
+    def __init__(self, db: Any, max_entries: int = MAX_RUN_LOG_ENTRIES) -> None:
+        self._db = db
+        self._max = max_entries
+        self._count = 0
+
+    async def write(self, entry: RunLog) -> None:
+        is_error = entry.level == "error"
+        if not is_error and self._count >= self._max:
+            return
+        await self._db["run_logs"].insert_one(model_to_doc(entry))
+        self._count += 1
+
+
 async def run_blocks(
     pipeline: PipelineDefinition,
     run_id: str,
     db: Any,
     lemming_id: str,
+    *,
+    tracer: DebugTracer | None = None,
 ) -> dict[str, Any]:
     """Execute all blocks in topological order, piping data between them.
 
@@ -150,6 +181,8 @@ async def run_blocks(
     BlockRegistry.discover()
 
     order = topological_sort(pipeline.blocks, pipeline.pipes)
+    if tracer is None:
+        tracer = DebugTracer(None, run_id, enabled=False)
 
     block_map: dict[str, BlockDefinition] = {b.uid: b for b in pipeline.blocks}
 
@@ -162,6 +195,8 @@ async def run_blocks(
     parcels: dict[str, list[Parcel]] = {}
 
     last_output: dict[str, Any] = {}
+    run_logger = _RunLogger(db)
+    await tracer.record_order(order)
 
     for block_uid in order:
         block_def = block_map[block_uid]
@@ -226,7 +261,15 @@ async def run_blocks(
         except Exception as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
             await _record_block_failure(
-                db, run_id, lemming_id, block_uid, block_def, elapsed_ms, exc,
+                db, run_id, lemming_id, block_uid, block_def,
+                elapsed_ms, exc, run_logger,
+            )
+            await tracer.record_block(
+                block_uid, block_def.block_type,
+                duration_ms=elapsed_ms,
+                parcel_count=0,
+                status="failed",
+                error=str(exc),
             )
             raise
 
@@ -235,7 +278,7 @@ async def run_blocks(
             parcels[block_uid][0].fields if parcels[block_uid] else {}
         )
 
-        # Write RunLog entry
+        # Write RunLog entry — never include output content by default
         log_entry = RunLog(
             run_id=run_id,
             lemming_id=lemming_id,
@@ -244,20 +287,32 @@ async def run_blocks(
             level="info",
             msg="Block completed",
             duration_ms=elapsed_ms,
-            output_summary=last_output,
+            output_summary=last_output if LOG_BLOCK_OUTPUT else None,
         )
-        await db["run_logs"].insert_one(model_to_doc(log_entry))
+        await run_logger.write(log_entry)
 
-        # Update block state in run doc
+        # Update block state — status and timing only, no output content
+        state_update: dict[str, Any] = {
+            f"block_states.{block_uid}.status": "completed",
+            f"block_states.{block_uid}.duration_ms": elapsed_ms,
+        }
+        if LOG_BLOCK_OUTPUT:
+            state_update[f"block_states.{block_uid}.output"] = last_output
         await db["runs"].update_one(
             {"_id": ObjectId(run_id)},
-            {
-                "$set": {
-                    f"block_states.{block_uid}.status": "completed",
-                    f"block_states.{block_uid}.output": last_output,
-                    f"block_states.{block_uid}.duration_ms": elapsed_ms,
-                }
-            },
+            {"$set": state_update},
+        )
+
+        # Debug trace: record block summary + parcel glimpses
+        block_parcels = parcels.get(block_uid, [])
+        await tracer.record_block(
+            block_uid, block_def.block_type,
+            duration_ms=elapsed_ms,
+            parcel_count=len(block_parcels),
+        )
+        await tracer.record_parcels(
+            block_uid,
+            [p.fields for p in block_parcels],
         )
 
     return last_output
@@ -384,14 +439,16 @@ async def _record_block_failure(
     block_def: BlockDefinition,
     elapsed_ms: float,
     exc: Exception,
+    run_logger: _RunLogger,
 ) -> None:
     """Write failure state and log for a block."""
+    error_msg = _truncate(str(exc), MAX_ERROR_MESSAGE_LENGTH)
     await db["runs"].update_one(
         {"_id": ObjectId(run_id)},
         {
             "$set": {
                 f"block_states.{block_uid}.status": "failed",
-                f"block_states.{block_uid}.error": str(exc),
+                f"block_states.{block_uid}.error": error_msg,
                 f"block_states.{block_uid}.duration_ms": elapsed_ms,
             }
         },
@@ -402,10 +459,10 @@ async def _record_block_failure(
         block_id=block_uid,
         block_type=block_def.block_type,
         level="error",
-        msg=f"Block failed: {exc}",
+        msg=f"Block failed: {error_msg}",
         duration_ms=elapsed_ms,
     )
-    await db["run_logs"].insert_one(model_to_doc(log_entry))
+    await run_logger.write(log_entry)
 
 
 async def _publish_status(
@@ -476,14 +533,25 @@ async def execute_pipeline(ctx: dict, *, run_id: str) -> dict[str, Any]:  # type
 
     pipeline = doc_to_model(pipeline_doc, PipelineDefinition)
 
+    # Set up debug tracer if the run is flagged for debugging
+    debug_enabled = run_doc.get("debug", False)
+    redis = None
+    if debug_enabled:
+        try:
+            from llming_plumber.db import get_redis
+            redis = get_redis()
+        except Exception:
+            logger.warning("Debug mode requested but Redis unavailable", exc_info=True)
+
+    tracer = DebugTracer(redis, run_id, enabled=debug_enabled)
+
     try:
-        result = await run_blocks(pipeline, run_id, db, lemming_id)
+        result = await run_blocks(pipeline, run_id, db, lemming_id, tracer=tracer)
         await db["runs"].update_one(
             {"_id": ObjectId(run_id)},
             {
                 "$set": {
                     "status": "completed",
-                    "output": result,
                     "finished_at": datetime.now(UTC),
                 }
             },
@@ -497,7 +565,7 @@ async def execute_pipeline(ctx: dict, *, run_id: str) -> dict[str, Any]:  # type
             {
                 "$set": {
                     "status": "failed",
-                    "error": str(e),
+                    "error": _truncate(str(e), MAX_ERROR_MESSAGE_LENGTH),
                     "finished_at": datetime.now(UTC),
                 }
             },

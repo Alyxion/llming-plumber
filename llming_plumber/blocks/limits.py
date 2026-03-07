@@ -82,6 +82,41 @@ MAX_ELEMENTS_PER_SECTION: int = _env_int("MAX_ELEMENTS_PER_SECTION", 2_000)
 """Max elements per Word document section."""
 
 # ------------------------------------------------------------------
+# Logging / data protection
+# ------------------------------------------------------------------
+
+MAX_RUN_LOG_ENTRIES: int = _env_int("MAX_RUN_LOG_ENTRIES", 50)
+"""Max RunLog documents written to MongoDB per pipeline run.
+Covers the entire run including all fan-out iterations.
+Errors are always logged regardless of this cap."""
+
+LOG_BLOCK_OUTPUT: bool = (
+    os.environ.get("PLUMBER_LOG_BLOCK_OUTPUT", "0") in ("1", "true", "yes")
+)
+"""Whether to persist block output data in run logs and block_states.
+Default OFF — block outputs may contain private data and must not
+be written to MongoDB unless explicitly opted in."""
+
+MAX_ERROR_MESSAGE_LENGTH: int = _env_int("MAX_ERROR_MESSAGE_LENGTH", 2000)
+"""Truncate error messages stored in MongoDB to this length."""
+
+# ------------------------------------------------------------------
+# Debug trace (Redis)
+# ------------------------------------------------------------------
+
+DEBUG_TTL_SECONDS: int = _env_int("DEBUG_TTL_SECONDS", 3600)
+"""Auto-expire debug trace keys in Redis after this many seconds (default 1 h)."""
+
+DEBUG_MAX_GLIMPSES: int = _env_int("DEBUG_MAX_GLIMPSES", 200)
+"""Max item glimpses (short labels) stored per block in debug mode."""
+
+DEBUG_MAX_PARCELS: int = _env_int("DEBUG_MAX_PARCELS", 20)
+"""Max parcels with full detail stored per block in debug mode."""
+
+DEBUG_MAX_PARCEL_BYTES: int = _env_int("DEBUG_MAX_PARCEL_BYTES", 100_000)
+"""Max JSON size in bytes for a single parcel's debug snapshot."""
+
+# ------------------------------------------------------------------
 # Recursion / depth
 # ------------------------------------------------------------------
 
