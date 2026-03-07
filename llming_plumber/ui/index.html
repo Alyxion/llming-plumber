@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Plumber</title>
+
+  <!-- All CSS vendored locally — zero external requests -->
+  <link rel="stylesheet" href="/vendor/css/material-icons.css" />
+  <link rel="stylesheet" href="/vendor/css/quasar.css" />
+  <link rel="stylesheet" href="/vendor/css/vue-flow-core.css" />
+  <link rel="stylesheet" href="/vendor/css/vue-flow-theme-default.css" />
+  <link rel="stylesheet" href="/vendor/css/vue-flow-minimap.css" />
+  <link rel="stylesheet" href="/vendor/css/vue-flow-controls.css" />
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <div id="app"></div>
+
+  <!-- Shim process.env for bundler-targeted ESM libs (vue-flow) -->
+  <script>window.process = { env: { NODE_ENV: 'production' } }</script>
+
+  <!-- Vue (global) + Quasar (UMD) — must be in body so document.body exists -->
+  <script src="/vendor/js/vue.global.js"></script>
+  <script src="/vendor/js/quasar.umd.js"></script>
+
+  <!-- Import map for ESM modules (Vue Flow, Pinia, Vue Router) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "vue": "/vendor/js/vue-global-shim.mjs",
+      "vue-router": "/vendor/js/vue-router.esm-browser.js",
+      "vue-demi": "/vendor/js/vue-demi.mjs",
+      "pinia": "/vendor/js/pinia.esm-browser.js",
+      "@vue/devtools-api": "/vendor/js/vue-devtools-api-stub.js",
+      "@vue-flow/core": "/vendor/js/vue-flow-core.mjs",
+      "@vue-flow/background": "/vendor/js/vue-flow-background.mjs",
+      "@vue-flow/controls": "/vendor/js/vue-flow-controls.mjs",
+      "@vue-flow/minimap": "/vendor/js/vue-flow-minimap.mjs"
+    }
+  }
+  </script>
+
+  <!-- App entry point (ESM) -->
+  <script type="module" src="/app.js?v=2"></script>
+</body>
+</html>

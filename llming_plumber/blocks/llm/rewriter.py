@@ -12,29 +12,27 @@ from llming_plumber.blocks.base import (
     BlockInput,
     BlockOutput,
 )
-from llming_plumber.blocks.llm import _client
+from llming_plumber.blocks.llm import _client, _defaults
 
 
 class RewriterInput(BlockInput):
     provider: str = Field(
-        default="openai",
+        default_factory=_defaults.provider_factory("medium"),
         title="Provider",
         description="LLM provider to use",
         json_schema_extra={
-            "widget": "select",
-            "options": [
-                "openai",
-                "azure_openai",
-                "anthropic",
-                "google",
-                "mistral",
-            ],
+            "widget": "combobox",
+            "options": _defaults.PROVIDERS,
         },
     )
     model: str = Field(
+        default_factory=_defaults.model_factory("medium"),
         title="Model",
         description="Model identifier",
-        json_schema_extra={"placeholder": "gpt-5-nano"},
+        json_schema_extra={
+            "widget": "combobox",
+            "options_ref": "llm_models",
+        },
     )
     text: str = Field(
         title="Text",
@@ -75,6 +73,7 @@ class RewriterOutput(BlockOutput):
 class RewriterBlock(
     BaseBlock[RewriterInput, RewriterOutput],
 ):
+    llm_tier: ClassVar[str] = "medium"
     block_type: ClassVar[str] = "llm_rewriter"
     icon: ClassVar[str] = "tabler/edit"
     categories: ClassVar[list[str]] = ["llm/text"]

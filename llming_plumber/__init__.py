@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import contextlib
+from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse
 
 from llming_plumber.config import settings
+
+# Load .env so block API keys (OPENWEATHER_API_KEY, etc.) are available
+load_dotenv()
+
+# UI directory — vendored JS/CSS, no build step needed
+_UI_DIR = Path(__file__).parent / "ui"
 
 
 def create_app(mode: str | None = None) -> FastAPI:
@@ -28,6 +38,28 @@ def create_app(mode: str | None = None) -> FastAPI:
     from llming_plumber.api import router as api_router
 
     app.include_router(api_router, prefix=settings.api_prefix)
+
+    # Serve the UI — all assets are local, no npm/CDN needed
+    if _UI_DIR.is_dir():
+        # Static sub-directories
+        app.mount("/vendor", StaticFiles(directory=str(_UI_DIR / "vendor")), name="vendor")
+        app.mount("/static", StaticFiles(directory=str(_UI_DIR / "static")), name="ui-static")
+        app.mount("/themes", StaticFiles(directory=str(_UI_DIR / "themes")), name="themes")
+        app.mount("/plugins", StaticFiles(directory=str(_UI_DIR / "plugins")), name="plugins")
+
+        # Serve JS modules (app.js and any future modules)
+        @app.get("/app.js")
+        async def _serve_app_js() -> FileResponse:
+            return FileResponse(str(_UI_DIR / "app.js"), media_type="text/javascript")
+
+        # SPA catch-all — must be last
+        @app.get("/{full_path:path}")
+        async def _serve_spa(full_path: str) -> FileResponse:
+            """Serve index.html for any non-API, non-static route."""
+            file = _UI_DIR / full_path
+            if file.is_file() and not full_path.startswith("api"):
+                return FileResponse(str(file))
+            return FileResponse(str(_UI_DIR / "index.html"))
 
     return app
 

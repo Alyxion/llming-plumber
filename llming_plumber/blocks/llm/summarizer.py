@@ -12,7 +12,7 @@ from llming_plumber.blocks.base import (
     BlockInput,
     BlockOutput,
 )
-from llming_plumber.blocks.llm import _client
+from llming_plumber.blocks.llm import _client, _defaults
 
 _LENGTH_HINTS: dict[str, str] = {
     "brief": "Keep the summary very short (2-3 sentences max).",
@@ -37,24 +37,22 @@ _TEMPLATE = _client.load_prompt("summarizer")
 
 class SummarizerInput(BlockInput):
     provider: str = Field(
-        default="openai",
+        default_factory=_defaults.provider_factory("medium"),
         title="Provider",
         description="LLM provider to use",
         json_schema_extra={
-            "widget": "select",
-            "options": [
-                "openai",
-                "azure_openai",
-                "anthropic",
-                "google",
-                "mistral",
-            ],
+            "widget": "combobox",
+            "options": _defaults.PROVIDERS,
         },
     )
     model: str = Field(
+        default_factory=_defaults.model_factory("medium"),
         title="Model",
         description="Model identifier",
-        json_schema_extra={"placeholder": "gpt-5-nano"},
+        json_schema_extra={
+            "widget": "combobox",
+            "options_ref": "llm_models",
+        },
     )
     text: str = Field(
         title="Text",
@@ -92,6 +90,7 @@ class SummarizerOutput(BlockOutput):
 class SummarizerBlock(
     BaseBlock[SummarizerInput, SummarizerOutput],
 ):
+    llm_tier: ClassVar[str] = "medium"
     block_type: ClassVar[str] = "llm_summarizer"
     icon: ClassVar[str] = "tabler/file-text"
     categories: ClassVar[list[str]] = ["llm/text"]

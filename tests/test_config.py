@@ -20,7 +20,7 @@ class TestSettings:
         assert s.health_check_interval == 30
         assert s.api_prefix == "/api"
         assert s.host == "0.0.0.0"
-        assert s.port == 8000
+        assert s.port == 8100
         assert s.api_cache == "on"
         assert s.api_cache_max_ttl == 1800
         assert s.secret_key == ""

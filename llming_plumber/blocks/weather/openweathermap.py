@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, ClassVar
 
 import httpx
 from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+
+
+def _owm_key() -> str:
+    return os.environ.get("OPENWEATHER_API_KEY", "")
+
+
+def _owm_base() -> str:
+    return os.environ.get("OPENWEATHER_API_BASE", "https://api.openweathermap.org")
 
 
 class WeatherInput(BlockInput):
@@ -17,8 +26,9 @@ class WeatherInput(BlockInput):
         json_schema_extra={"placeholder": "Berlin,DE"},
     )
     api_key: str = Field(
+        default_factory=_owm_key,
         title="API Key",
-        description="OpenWeatherMap API key",
+        description="OpenWeatherMap API key (defaults to OPENWEATHER_API_KEY env var)",
         json_schema_extra={"secret": True},
     )
     units: str = Field(
@@ -31,7 +41,7 @@ class WeatherInput(BlockInput):
         },
     )
     api_base: str = Field(
-        default="https://api.openweathermap.org",
+        default_factory=_owm_base,
         title="API Base URL",
         description="OpenWeatherMap API base URL",
         json_schema_extra={

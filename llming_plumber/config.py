@@ -2,7 +2,29 @@ from __future__ import annotations
 
 from typing import Literal
 
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings
+
+
+class LlmTierConfig(BaseModel):
+    """Provider + model for a single LLM tier."""
+
+    provider: str
+    model: str
+
+
+class LlmDefaults(BaseModel):
+    """Global LLM defaults for three task complexity tiers."""
+
+    complex: LlmTierConfig = LlmTierConfig(
+        provider="anthropic", model="claude-opus-4-6"
+    )
+    medium: LlmTierConfig = LlmTierConfig(
+        provider="anthropic", model="claude-sonnet-4-6"
+    )
+    fast: LlmTierConfig = LlmTierConfig(
+        provider="anthropic", model="claude-haiku-4-5-20251001"
+    )
 
 
 class Settings(BaseSettings):
@@ -27,7 +49,7 @@ class Settings(BaseSettings):
     # API
     api_prefix: str = "/api"
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8100
 
     # API response cache
     api_cache: Literal["on", "off", "aggressive"] = "on"
@@ -35,6 +57,9 @@ class Settings(BaseSettings):
 
     # Credentials encryption
     secret_key: str = ""
+
+    # Global LLM defaults — override via env PLUMBER_LLM_COMPLEX_PROVIDER, etc.
+    llm: LlmDefaults = LlmDefaults()
 
     model_config = {
         "env_prefix": "PLUMBER_",

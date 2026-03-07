@@ -678,6 +678,37 @@ single `APIRouter` so they can be mounted at any prefix.
 
 ---
 
+## Frontend
+
+The visual pipeline editor is a Vue 3 SPA built with Quasar and @vue-flow/core.
+See [`frontend/README.md`](../../frontend/README.md) for full documentation.
+
+### Development
+
+```bash
+# Backend (port 8100)
+.venv/bin/python -m uvicorn llming_plumber.main:app --port 8100 --reload
+
+# Frontend dev server (port 9000, proxies /api → 8100)
+cd frontend && npm run dev
+```
+
+### Production
+
+```bash
+cd frontend && npm run build   # → frontend/dist/
+# FastAPI auto-serves dist/ as SPA — only port 8100 needed
+```
+
+### Plugin System
+
+The frontend supports extensibility via plugins that can provide custom
+node renderers, sidebar panels, themes, toolbar actions, and block config
+editors. See [`frontend/README.md`](../../frontend/README.md) for the
+plugin API reference.
+
+---
+
 ## Configuration
 
 All configuration is via environment variables (loaded from `.env`):
@@ -701,7 +732,7 @@ PLUMBER_HEALTH_CHECK_INTERVAL=30
 # API
 PLUMBER_API_PREFIX=/api         # prefix for all API routes
 PLUMBER_HOST=0.0.0.0
-PLUMBER_PORT=8000
+PLUMBER_PORT=8100
 
 # Credentials encryption
 PLUMBER_SECRET_KEY=...          # for encrypting stored credentials
@@ -772,6 +803,20 @@ llming_plumber/                  # the installable package
 ├── db.py                    # MongoDB + Redis connection helpers
 └── cli.py                   # `llming-plumber serve --mode=...`
                              # `llming-plumber mcp serve --blocks ...`
+
+frontend/                       # Vue 3 + Quasar + @vue-flow/core SPA
+├── src/
+│   ├── layouts/             # MainLayout.vue (header, sidebar, content)
+│   ├── pages/               # PipelineList, PipelineEditor, RunList
+│   ├── components/          # BlockNode, BlockPalette, BlockConfigPanel
+│   ├── stores/              # Pinia stores (pipeline, theme)
+│   ├── themes/              # Theme system (Lodge, Daylight, Midnight, Forest)
+│   ├── plugins/             # Plugin system for extensibility
+│   ├── composables/         # useApi (Axios)
+│   └── types/               # TypeScript types mirroring Python models
+├── index.html
+├── vite.config.ts           # Vite + proxy to FastAPI at port 8100
+└── package.json
 ```
 
 ---

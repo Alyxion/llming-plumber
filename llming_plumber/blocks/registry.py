@@ -22,6 +22,7 @@ class BlockMeta(BaseModel):
     icon: str
     categories: list[str]
     cache_ttl: int
+    llm_tier: str | None = None
     input_schema: dict[str, Any]
     output_schema: dict[str, Any]
 
@@ -172,6 +173,7 @@ class BlockRegistry:
                     icon=getattr(block_cls, "icon", "tabler/puzzle"),
                     categories=getattr(block_cls, "categories", []),
                     cache_ttl=getattr(block_cls, "cache_ttl", 0),
+                    llm_tier=getattr(block_cls, "llm_tier", None),
                     input_schema=input_schema,
                     output_schema=output_schema,
                 )

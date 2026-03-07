@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, ClassVar
 
 import httpx
 from pydantic import BaseModel, Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
+
+
+def _newsapi_key() -> str:
+    return os.environ.get("NEWSAPI_KEY", "")
+
+
+def _newsapi_base() -> str:
+    return os.environ.get("NEWSAPI_BASE", "https://newsapi.org/v2")
 
 
 class NewsArticle(BaseModel):
@@ -22,8 +31,9 @@ class NewsArticle(BaseModel):
 
 class NewsApiInput(BlockInput):
     api_key: str = Field(
+        default_factory=_newsapi_key,
         title="API Key",
-        description="NewsAPI.org API key",
+        description="NewsAPI.org API key (defaults to NEWSAPI_KEY env var)",
         json_schema_extra={"secret": True},
     )
     query: str | None = Field(
@@ -65,7 +75,7 @@ class NewsApiInput(BlockInput):
         },
     )
     api_base: str = Field(
-        default="https://newsapi.org/v2",
+        default_factory=_newsapi_base,
         title="API Base URL",
         description="NewsAPI base URL",
         json_schema_extra={"group": "advanced"},
