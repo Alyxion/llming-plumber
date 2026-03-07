@@ -1,0 +1,9 @@
+project: plumber
+version: 0.1.0
+features:
+- pipelines
+- triggers
+- blocks
+config:
+  mongo_uri: mongodb://localhost:27017
+  redis_url: redis://localhost:6379/0

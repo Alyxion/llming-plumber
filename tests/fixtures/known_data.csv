@@ -1,0 +1,4 @@
+id,name,value,active
+1,Alpha,10.5,true
+2,Beta,20.3,false
+3,Gamma,30.1,true

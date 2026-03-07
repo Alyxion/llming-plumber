@@ -374,14 +374,30 @@ Different pipes can have different `attachment_filter` settings.
 
 Merge block collects parcels from multiple sources into one stream.
 
-### 4. Iteration (list → single parcel)
+### 4. Iteration (list → per-item branch execution)
 
 ```
-[RSS Reader] ──articles──► [Loop] ──parcel──► [Translate] ──parcel──► [Collect]
+[Excel Reader] ──records──► [Split] ──item──► [HTTP Request] ──page──► [HTML Extractor]
+                                                                              │
+                                                                              ▼
+                                                                         [Collect]
 ```
 
-Loop block takes N parcels, emits them one at a time. Collect gathers
-results back.
+The Split block takes a list of records (e.g. URLs from a spreadsheet) and
+**re-runs the downstream branch once per item**. Each item flows through the
+same subgraph independently — an HTTP request, parser, LLM call, whatever the
+user has wired up. The Collect block gathers results back into a list.
+
+This is the core iteration primitive. It means:
+- Every block stays simple (single input → single output)
+- Users compose complex batch workflows from simple blocks
+- The same HTTP Request block works for one URL or a thousand
+- Error handling, retries, and concurrency are executor concerns
+
+**Anti-pattern: batch blocks.** Do NOT create blocks like "HttpBatchBlock"
+or "HtmlBatchExtractor" that internally loop over lists. Iteration belongs
+in the executor/graph, not inside blocks. Blocks process one item at a time.
+The executor handles fan-out, concurrency, error isolation, and collection.
 
 ### 5. Enrichment (add attachments)
 

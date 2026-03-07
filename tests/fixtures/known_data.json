@@ -1,0 +1,20 @@
+{
+  "pipelines": [
+    {
+      "name": "News Digest",
+      "blocks": 2,
+      "active": true
+    },
+    {
+      "name": "Weather Monitor",
+      "blocks": 2,
+      "active": true
+    },
+    {
+      "name": "Sentiment Tracker",
+      "blocks": 3,
+      "active": false
+    }
+  ],
+  "version": "0.1.0"
+}

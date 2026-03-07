@@ -82,9 +82,10 @@ class RssReaderBlock(BaseBlock[RssReaderInput, RssReaderOutput]):
 ### Rules
 
 - **One file per block, organized by category** — `llming_plumber/blocks/weather/openweathermap.py`, `llming_plumber/blocks/news/rss_reader.py`, etc.
-- **No cross-block imports** — blocks never import from each other.
+- **No cross-block imports** — blocks never import from each other. (Exception: builder/extractor pairs in `documents/` share Pydantic models for round-trip compatibility.)
 - **No global state** — all dependencies come through `BlockContext`.
 - **Input/Output models are the contract** — the executor validates data against these models when piping between blocks.
+- **Blocks process one item, never batch internally** — a block receives a single input and produces a single output. Iteration over lists (e.g. fetching 100 URLs from a spreadsheet) is handled by the executor's fan-out mechanism, not by building "batch" variants of blocks. This keeps blocks simple, composable, and independently testable. See [Data Piping — Iteration](data-piping.md#4-iteration-list--per-item-branch-execution).
 
 ### Standalone Usability
 

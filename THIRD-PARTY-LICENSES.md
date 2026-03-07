@@ -30,4 +30,47 @@ This project includes the following third-party assets.
 
 ---
 
-Full license texts are included in each icon directory under `static/icons/`.
+## Test Fixtures
+
+The following test fixture files are sourced from MIT-licensed open-source
+projects. They are used exclusively for automated testing and are not
+distributed as part of the application.
+
+### pdfplumber
+
+- **Source:** https://github.com/jsvine/pdfplumber
+- **License:** MIT License
+- **Copyright:** (c) 2015 Jeremy Singer-Vine
+- **Files in this repo:**
+  - `tests/fixtures/sample.pdf` — from `tests/pdfs/pdffill-demo.pdf`
+  - `tests/fixtures/sample_text.pdf` — from `tests/pdfs/scotus-transcript-p1.pdf`
+
+### python-docx
+
+- **Source:** https://github.com/python-openxml/python-docx
+- **License:** MIT License
+- **Copyright:** (c) 2013 Steve Canny
+- **Files in this repo:**
+  - `tests/fixtures/sample.docx` — from `tests/test_files/test.docx`
+  - `tests/fixtures/sample_images.docx` — from `tests/test_files/having-images.docx`
+
+### python-pptx
+
+- **Source:** https://github.com/scanny/python-pptx
+- **License:** MIT License
+- **Copyright:** (c) 2013 Steve Canny
+- **Files in this repo:**
+  - `tests/fixtures/sample.pptx` — from `tests/test_files/test.pptx`
+
+### openpyxl
+
+- **Source:** https://github.com/fluidware/openpyxl (mirror of https://foss.heptapod.net/openpyxl/openpyxl)
+- **License:** MIT License
+- **Copyright:** (c) 2010 Eric Gazoni, Charlie Clark
+- **Files in this repo:**
+  - `tests/fixtures/sample.xlsx` — from `tests/test_data/genuine/guess_types.xlsx`
+  - `tests/fixtures/sample_empty.xlsx` — from `tests/test_data/genuine/empty.xlsx`
+
+---
+
+Full license texts are included in each icon directory under `llming_plumber/static/icons/`.
