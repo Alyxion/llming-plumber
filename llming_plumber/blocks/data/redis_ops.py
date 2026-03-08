@@ -656,3 +656,114 @@ class RedisIncrBlock(BaseBlock[RedisIncrInput, RedisIncrOutput]):
 
         result = await redis.incrby(input.key, input.amount)
         return RedisIncrOutput(value=result, key=input.key)
+
+
+# ------------------------------------------------------------------
+# RedisFileStore — store a FileRef in Redis
+# ------------------------------------------------------------------
+
+
+class RedisFileStoreInput(BlockInput):
+    key: str = Field(
+        title="Key",
+        description="Redis key to store the file under",
+    )
+    file_ref: dict[str, Any] = Field(
+        default_factory=dict,
+        title="File Reference",
+        description="FileRef object to store",
+    )
+    ttl_seconds: int = Field(
+        default=0,
+        title="TTL (seconds)",
+        description="Time to live. 0 = no expiry.",
+        json_schema_extra={"min": 0},
+    )
+
+
+class RedisFileStoreOutput(BlockOutput):
+    success: bool = False
+    key: str = ""
+    filename: str = ""
+    size_bytes: int = 0
+
+
+class RedisFileStoreBlock(BaseBlock[RedisFileStoreInput, RedisFileStoreOutput]):
+    block_type: ClassVar[str] = "redis_file_store"
+    icon: ClassVar[str] = "tabler/file-database"
+    categories: ClassVar[list[str]] = ["data/redis"]
+    description: ClassVar[str] = "Store a file (FileRef) in Redis"
+
+    async def execute(
+        self,
+        input: RedisFileStoreInput,
+        ctx: BlockContext | None = None,
+    ) -> RedisFileStoreOutput:
+        redis = _get_redis()
+        if redis is None:
+            return RedisFileStoreOutput(key=input.key)
+
+        from llming_plumber.models.file_ref import FileRef
+
+        ref = FileRef(**input.file_ref) if isinstance(input.file_ref, dict) else input.file_ref
+        payload = json.dumps(ref.model_dump())
+
+        if input.ttl_seconds > 0:
+            await redis.setex(input.key, input.ttl_seconds, payload)
+        else:
+            await redis.set(input.key, payload)
+
+        return RedisFileStoreOutput(
+            success=True,
+            key=input.key,
+            filename=ref.filename,
+            size_bytes=ref.size_bytes,
+        )
+
+
+# ------------------------------------------------------------------
+# RedisFileLoad — load a FileRef from Redis
+# ------------------------------------------------------------------
+
+
+class RedisFileLoadInput(BlockInput):
+    key: str = Field(
+        title="Key",
+        description="Redis key to retrieve the file from",
+    )
+
+
+class RedisFileLoadOutput(BlockOutput):
+    file_ref: dict[str, Any] = Field(default_factory=dict)
+    found: bool = False
+    filename: str = ""
+
+
+class RedisFileLoadBlock(BaseBlock[RedisFileLoadInput, RedisFileLoadOutput]):
+    block_type: ClassVar[str] = "redis_file_load"
+    icon: ClassVar[str] = "tabler/file-database"
+    categories: ClassVar[list[str]] = ["data/redis"]
+    description: ClassVar[str] = "Load a file (FileRef) from Redis"
+
+    async def execute(
+        self,
+        input: RedisFileLoadInput,
+        ctx: BlockContext | None = None,
+    ) -> RedisFileLoadOutput:
+        redis = _get_redis()
+        if redis is None:
+            return RedisFileLoadOutput()
+
+        raw = await redis.get(input.key)
+        if raw is None:
+            return RedisFileLoadOutput(found=False)
+
+        from llming_plumber.models.file_ref import FileRef
+
+        data = json.loads(raw)
+        ref = FileRef(**data)
+        return RedisFileLoadOutput(
+            file_ref=ref.model_dump(),
+            found=True,
+            filename=ref.filename,
+        )

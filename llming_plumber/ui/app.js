@@ -264,10 +264,11 @@ function portToFittingUid(fittings, portClass) {
   return fittings[idx]?.uid || (portClass.startsWith('input') ? 'input' : 'output')
 }
 
-function nodeHtml(blockType, label, status) {
+function nodeHtml(blockType, label, status, disabled) {
   const icon = blockIcon(blockType)
   const sc = { running: 'var(--p-node-running)', completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', idle: 'var(--p-node-idle)' }
-  return `<div class="block-node block-node--${status || 'idle'}">
+  const cls = `block-node block-node--${status || 'idle'}${disabled ? ' block-node--disabled' : ''}`
+  return `<div class="${cls}">
     <div class="block-node__status" style="background:${sc[status] || sc.idle}"></div>
     <div class="block-node__content">
       <span class="material-icons block-node__icon">${icon}</span>
@@ -279,46 +280,47 @@ function nodeHtml(blockType, label, status) {
   </div>`
 }
 
-function applyPortColors(editor, dfId, fittings) {
+function _buildPortTooltip(fitting, schema) {
+  const fields = schema?.properties ? Object.entries(schema.properties) : []
+  const titleColor = fitting.color ? ` style="color:${fitting.color}"` : ''
+  let fieldsHtml = ''
+  if (fields.length > 0) {
+    fieldsHtml = '<div class="port-tooltip__fields">' +
+      fields.map(([name, prop]) =>
+        `<div class="port-tooltip__field"><span class="port-tooltip__field-name">${name}</span><span class="port-tooltip__field-type">${prop.type || ''}${prop.description ? ' — ' + prop.description : ''}</span></div>`
+      ).join('') + '</div>'
+  }
+  return '<div class="port-tooltip">' +
+    `<div class="port-tooltip__title"${titleColor}>${fitting.label || fitting.uid}</div>` +
+    (fitting.description ? `<div class="port-tooltip__desc">${fitting.description}</div>` : '') +
+    fieldsHtml + '</div>'
+}
+
+function applyPortColors(_editor, dfId, fittings, catalogEntry) {
   const nodeEl = document.getElementById(`node-${dfId}`)
   if (!nodeEl) return
+  const outSchema = catalogEntry?.output_schema
+  const inSchema = catalogEntry?.input_schema
+
   fittings.output.forEach((f, i) => {
-    if (f.color) {
-      const portEl = nodeEl.querySelector(`.output.output_${i + 1}`)
-      if (portEl) { portEl.style.background = f.color; portEl.style.borderColor = f.color }
+    const portEl = nodeEl.querySelector(`.output.output_${i + 1}`)
+    if (!portEl) return
+    if (f.color) { portEl.style.background = f.color; portEl.style.borderColor = f.color }
+    // Tooltip
+    if (!portEl.querySelector('.port-tooltip')) {
+      portEl.insertAdjacentHTML('beforeend', _buildPortTooltip(f, outSchema))
     }
   })
   fittings.input.forEach((f, i) => {
-    if (f.color) {
-      const portEl = nodeEl.querySelector(`.input.input_${i + 1}`)
-      if (portEl) { portEl.style.background = f.color; portEl.style.borderColor = f.color }
+    const portEl = nodeEl.querySelector(`.input.input_${i + 1}`)
+    if (!portEl) return
+    if (f.color) { portEl.style.background = f.color; portEl.style.borderColor = f.color }
+    // Tooltip
+    if (!portEl.querySelector('.port-tooltip')) {
+      portEl.insertAdjacentHTML('beforeend', _buildPortTooltip(f, inSchema))
     }
   })
-  // Add port labels for multi-fitting blocks
-  if (fittings.output.length > 1) {
-    fittings.output.forEach((f, i) => {
-      const portEl = nodeEl.querySelector(`.output.output_${i + 1}`)
-      if (portEl && !portEl.querySelector('.port-label-tag')) {
-        const lbl = document.createElement('span')
-        lbl.className = 'port-label-tag port-label-tag--right'
-        lbl.textContent = f.label
-        if (f.color) lbl.style.color = f.color
-        portEl.appendChild(lbl)
-      }
-    })
-  }
-  if (fittings.input.length > 1) {
-    fittings.input.forEach((f, i) => {
-      const portEl = nodeEl.querySelector(`.input.input_${i + 1}`)
-      if (portEl && !portEl.querySelector('.port-label-tag')) {
-        const lbl = document.createElement('span')
-        lbl.className = 'port-label-tag port-label-tag--left'
-        lbl.textContent = f.label
-        if (f.color) lbl.style.color = f.color
-        portEl.appendChild(lbl)
-      }
-    })
-  }
+  // Port labels removed — fitting names shown in tooltip on hover instead
 }
 
 function applyEdgeColor(editor, srcDfId, tgtDfId, outputClass, inputClass, catalog, nodes, dfIdToUid) {
@@ -362,20 +364,20 @@ const PipelineListPage = defineComponent({
   setup() {
     const pipelines = ref([])
     const loading = ref(true)
+    const searchQuery = ref('')
     const catalogOpen = ref(false)
     const catalog = ref([])
     const catalogLoading = ref(false)
-    const busy = reactive({}) // key -> true while adding/removing
+    const busy = reactive({})
     const expandedPipeline = ref(null) // pipeline id showing run history
-    const pipelineRuns = ref([]) // runs for expanded pipeline
+    const pipelineRuns = ref([])
     const runsLoading = ref(false)
-    const expandedRun = ref(null) // run id showing block detail
-    const expandedRunDetail = ref(null) // full run detail
-    const expandedBlock = ref(null) // block within expanded run
+    const expandedRun = ref(null)
+    const expandedRunDetail = ref(null)
+    const expandedBlock = ref(null)
     let refreshTimer = null
 
     async function load() {
-      loading.value = true
       try { pipelines.value = await api('GET', '/pipelines') } catch {}
       loading.value = false
     }
@@ -397,40 +399,38 @@ const PipelineListPage = defineComponent({
     }
     async function addSample(key) {
       busy[key] = true
-      try {
-        await api('POST', `/demo-pipelines/add/${key}`)
-        await Promise.all([load(), loadCatalog()])
-      } catch {}
+      try { await api('POST', `/demo-pipelines/add/${key}`); await Promise.all([load(), loadCatalog()]) } catch {}
       busy[key] = false
     }
     async function removeSample(key) {
       busy[key] = true
-      try {
-        await api('DELETE', `/demo-pipelines/remove/${key}`)
-        await Promise.all([load(), loadCatalog()])
-      } catch {}
+      try { await api('DELETE', `/demo-pipelines/remove/${key}`); await Promise.all([load(), loadCatalog()]) } catch {}
       busy[key] = false
     }
-    function isSample(p) {
-      return (p.tags || []).some(t => t.startsWith('_sample:'))
+    function isSample(p) { return (p.tags || []).some(t => t.startsWith('_sample:')) }
+    function hasTimerBlock(p) {
+      return (p.blocks || []).some(b => b.block_type === 'timer_trigger')
     }
-    async function toggleSchedule(p, e) {
+    async function togglePipelineEnabled(p, e) {
       e.stopPropagation()
       const pid = p.id || p._id
-      if (p.schedule) {
-        // Disable: find and disable the schedule
-        try {
-          const schedules = await api('GET', '/schedules')
-          const sched = schedules.find(s => s.pipeline_id === pid && s.enabled)
-          if (sched) await api('PUT', `/schedules/${sched.id}`, { ...sched, enabled: false })
-        } catch {}
-      } else {
-        // Enable: trigger a save which re-creates the schedule (needs timer_trigger block)
-        try {
-          const full = await api('GET', `/pipelines/${pid}`)
-          await api('PUT', `/pipelines/${pid}`, full)
-        } catch {}
-      }
+      const newEnabled = !(p.enabled !== false) // toggle — default is true
+      try {
+        // Update the pipeline enabled flag
+        const full = await api('GET', `/pipelines/${pid}`)
+        full.enabled = newEnabled
+        await api('PUT', `/pipelines/${pid}`, full)
+        // Also toggle the schedule if it has one
+        if (hasTimerBlock(p)) {
+          const ss = await api('GET', '/schedules')
+          const existing = ss.find(s => s.pipeline_id === pid)
+          if (existing && newEnabled && !existing.enabled) {
+            await api('PUT', `/schedules/${existing.id}`, { ...existing, enabled: true })
+          } else if (existing && !newEnabled && existing.enabled) {
+            await api('PUT', `/schedules/${existing.id}`, { ...existing, enabled: false })
+          }
+        }
+      } catch {}
       await load()
     }
     function timeAgo(dateStr) {
@@ -438,6 +438,7 @@ const PipelineListPage = defineComponent({
       const d = new Date(dateStr)
       if (isNaN(d)) return ''
       const s = Math.floor((Date.now() - d.getTime()) / 1000)
+      if (s < 0) return 'just now'
       if (s < 5) return 'just now'
       if (s < 60) return `${s}s ago`
       if (s < 3600) return `${Math.floor(s / 60)}m ago`
@@ -457,9 +458,7 @@ const PipelineListPage = defineComponent({
     }
     async function toggleRunDetail(runId, e) {
       e.stopPropagation()
-      if (expandedRun.value === runId) {
-        expandedRun.value = null; expandedRunDetail.value = null; expandedBlock.value = null; return
-      }
+      if (expandedRun.value === runId) { expandedRun.value = null; expandedRunDetail.value = null; expandedBlock.value = null; return }
       expandedRun.value = runId; expandedBlock.value = null
       try { expandedRunDetail.value = await api('GET', `/runs/${runId}`) } catch { expandedRunDetail.value = null }
     }
@@ -473,13 +472,11 @@ const PipelineListPage = defineComponent({
       return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
     }
     function fmtDur(ms) {
-      if (!ms) return ''
-      return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
+      if (ms == null) return ''
+      return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
     }
     function onKeydown(e) {
-      if (e.key === 'Escape' && catalogOpen.value) {
-        catalogOpen.value = false
-      }
+      if (e.key === 'Escape' && catalogOpen.value) catalogOpen.value = false
       if (e.key === 'Escape' && expandedPipeline.value) {
         expandedPipeline.value = null; pipelineRuns.value = []; expandedRun.value = null; expandedRunDetail.value = null
       }
@@ -487,7 +484,6 @@ const PipelineListPage = defineComponent({
     onMounted(() => {
       load()
       window.addEventListener('keydown', onKeydown)
-      // Refresh every 5s to pick up running status and schedule changes
       refreshTimer = setInterval(() => { if (!loading.value) load() }, 5000)
     })
     Vue.onUnmounted(() => {
@@ -495,26 +491,235 @@ const PipelineListPage = defineComponent({
       if (refreshTimer) clearInterval(refreshTimer)
     })
 
-    // Group catalog by category
     function catalogByCategory() {
       const groups = {}
-      for (const s of catalog.value) {
-        if (!groups[s.category]) groups[s.category] = []
-        groups[s.category].push(s)
-      }
+      for (const s of catalog.value) { if (!groups[s.category]) groups[s.category] = []; groups[s.category].push(s) }
       return groups
     }
 
+    // Compute filtered pipelines based on search
+    function filteredPipelines() {
+      const q = searchQuery.value.toLowerCase().trim()
+      if (!q) return pipelines.value
+      return pipelines.value.filter(p => p.name.toLowerCase().includes(q))
+    }
+
+    // Extract interesting stats from a block log's output_summary
+    function extractStats(log, statKeys) {
+      if (!log || !log.length) return []
+      const stats = []
+      const seen = new Set()
+      for (const entry of log) {
+        const os = entry.output_summary || {}
+        for (const [k, v] of Object.entries(os)) {
+          if (seen.has(k)) continue
+          // Auto-detect interesting numeric/count fields
+          const isInteresting = statKeys.length
+            ? statKeys.includes(k)
+            : /count|size|total|rows|items|files|bytes|records|length|pages/.test(k)
+          if (isInteresting && v != null && v !== '' && v !== 0) {
+            seen.add(k)
+            const label = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+            stats.push({ key: k, label, value: typeof v === 'number' && v > 1024 ? `${(v / 1024).toFixed(1)}K` : String(v) })
+          }
+        }
+      }
+      return stats.slice(0, 4) // max 4 stats shown
+    }
+
+    // Render a single pipeline row
+    function renderPipelineRow(p) {
+      const pid = p.id || p._id
+      const sample = isSample(p)
+      const lr = p.latest_run
+      const isRunning = lr && (lr.status === 'running' || lr.status === 'queued')
+      const scheduleEnabled = !!(p.schedule && p.schedule.enabled)
+      const pipelineEnabled = p.enabled !== false
+      const isExpanded = expandedPipeline.value === pid
+      const display = p.display || {}
+      const accentColor = display.color || null
+      const blockLog = lr?.log || []
+      const statKeys = display.stat_keys || []
+      const stats = extractStats(blockLog, statKeys)
+
+      // Accent style
+      const accentStyle = accentColor ? `border-left: 3px solid ${accentColor};` : ''
+
+      // Time display
+      const timeDisplay = isRunning
+        ? (lr.started_at ? timeAgo(lr.started_at) : 'queued')
+        : lr?.finished_at ? timeAgo(lr.finished_at) : ''
+
+      const durDisplay = lr?.duration_ms != null ? fmtDur(lr.duration_ms) : ''
+
+      return h('div', { key: pid, class: 'pl-row' + (isExpanded ? ' pl-row--expanded' : '') + (sample ? ' pl-row--sample' : '') + (!pipelineEnabled ? ' pl-row--disabled' : ''), style: accentStyle }, [
+        // Main row: toggle | content | right
+        h('div', { class: 'pl-row__main' }, [
+
+          // Left column: enabled toggle (all pipelines)
+          h('div', { class: 'pl-row__toggle-col' }, [
+            h('button', {
+              class: 'pl-toggle' + (pipelineEnabled ? ' pl-toggle--on' : ''),
+              title: pipelineEnabled ? 'Disable pipeline' : 'Enable pipeline',
+              onClick: (e) => togglePipelineEnabled(p, e),
+            }, [
+              h('div', { class: 'pl-toggle__track' }, [
+                h('div', { class: 'pl-toggle__thumb' }),
+              ]),
+            ]),
+          ]),
+
+          // Clickable content area
+          h('div', { class: 'pl-row__content', onClick: () => router.push(`/editor/${pid}`) }, [
+            // Left: name + meta
+            h('div', { class: 'pl-row__left' }, [
+              h('div', { class: 'pl-row__info' }, [
+                h('div', { class: 'pl-row__name' }, [
+                  display.icon ? h('span', { class: 'material-icons', style: 'font-size:16px; margin-right:6px; vertical-align:middle; color:' + (accentColor || 'var(--p-text-secondary)') }, display.icon) : null,
+                  isRunning ? h('span', { class: 'material-icons pl-row__running-icon' }, 'play_circle') : null,
+                  p.name,
+                  sample ? h('span', { class: 'sample-badge', style: 'margin-left:8px' }, 'sample') : null,
+                ]),
+                h('div', { class: 'pl-row__meta' }, [
+                  `${(p.blocks || []).length} blocks · v${p.version || 1}`,
+                  scheduleEnabled ? h('span', { class: 'pl-row__schedule', style: accentColor ? `background:${accentColor}` : '' }, [
+                    p.schedule.interval_seconds ? `${p.schedule.interval_seconds}s` : p.schedule.cron_expression || 'sched',
+                  ]) : null,
+                ]),
+              ]),
+            ]),
+
+            // Center: block execution dots
+            blockLog.length > 0 ? h('div', { class: 'pl-row__dots' },
+              blockLog.map((entry, i) => {
+                const st = entry.status || 'pending'
+                return h('div', {
+                  key: i,
+                  class: 'pl-dot pl-dot--' + st,
+                  title: `${entry.label || entry.block_type}: ${st}${entry.duration_ms ? ' (' + fmtDur(entry.duration_ms) + ')' : ''}${entry.error ? '\n' + entry.error : ''}`,
+                  style: accentColor && st === 'completed' ? `background:${accentColor}` : '',
+                })
+              })
+            ) : h('div', { class: 'pl-row__dots' }),
+
+            // Right: stats + timing
+            h('div', { class: 'pl-row__right' }, [
+              stats.length > 0 ? h('div', { class: 'pl-row__stats' },
+                stats.map(s => h('span', { key: s.key, class: 'pl-stat', title: s.key }, [
+                  h('span', { class: 'pl-stat__val' }, s.value),
+                  h('span', { class: 'pl-stat__label' }, s.label),
+                ]))
+              ) : null,
+              h('div', { class: 'pl-row__timing' }, [
+                durDisplay ? h('span', { class: 'pl-row__dur' }, durDisplay) : null,
+                timeDisplay ? h('span', { class: 'pl-row__time pl-row__time--' + (lr?.status || 'idle') }, timeDisplay) : null,
+                lr?.error ? h('span', { class: 'pl-row__error-hint', title: lr.error }, [
+                  h('span', { class: 'material-icons', style: 'font-size:13px' }, 'warning'),
+                ]) : null,
+              ]),
+            ]),
+          ]),
+
+          // Action buttons (far right)
+          h('div', { class: 'pl-row__actions' }, [
+            h('button', { class: 'icon-btn', title: 'Run history', onClick: (e) => toggleRunHistory(pid, e) }, [
+              h('span', { class: 'material-icons', style: 'font-size:16px; color:' + (isExpanded ? 'var(--p-primary)' : 'var(--p-text-secondary)') }, 'history'),
+            ]),
+            h('button', { class: 'icon-btn', title: 'Delete', onClick: (e) => deletePipeline(pid, e) }, [
+              h('span', { class: 'material-icons', style: 'font-size:16px; color:var(--p-node-failed)' }, 'delete'),
+            ]),
+          ]),
+        ]),
+
+        // Expanded run history (inline below the row)
+        isExpanded ? h('div', { class: 'pl-row__history' }, [
+          h('div', { class: 'run-history-panel__header' }, [
+            h('h3', { style: 'margin:0; font-size:13px; color:var(--p-text)' }, ['Run History']),
+            h('button', { class: 'icon-btn', onClick: (e) => { e.stopPropagation(); expandedPipeline.value = null } }, [
+              h('span', { class: 'material-icons', style: 'font-size:16px' }, 'close'),
+            ]),
+          ]),
+          runsLoading.value
+            ? h('div', { style: 'padding:12px; color:var(--p-text-secondary); font-size:12px' }, 'Loading...')
+            : pipelineRuns.value.length === 0
+              ? h('div', { style: 'padding:12px; color:var(--p-text-secondary); font-size:12px' }, 'No runs yet')
+              : h('div', { class: 'run-history-list' }, pipelineRuns.value.map(r => {
+                  const isOpen = expandedRun.value === r.id
+                  const rd = expandedRunDetail.value
+                  const statusColors = { completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', running: 'var(--p-node-running)' }
+                  return h('div', { key: r.id, class: 'run-history-item' + (isOpen ? ' run-history-item--open' : '') }, [
+                    h('div', { class: 'run-history-item__row', onClick: (e) => toggleRunDetail(r.id, e) }, [
+                      h('span', { class: 'material-icons', style: 'font-size:14px; color:' + (statusColors[r.status] || 'var(--p-text-secondary)') },
+                        r.status === 'completed' ? 'check_circle' : r.status === 'failed' ? 'error' : r.status === 'running' ? 'play_circle' : 'circle'),
+                      h('span', { class: `status-badge status-badge--${r.status}`, style: 'font-size:10px; padding:1px 5px' }, r.status),
+                      h('span', { style: 'font-size:11px; color:var(--p-text-secondary)' }, fmtRunTime(r.created_at)),
+                      fmtRunDur(r) ? h('span', { style: 'font-size:11px; color:var(--p-text-secondary)' }, fmtRunDur(r)) : null,
+                      (r.log && r.log.length) ? h('span', { style: 'font-size:10px; color:var(--p-text-secondary); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap' },
+                        r.log.map(e => `${e.label || e.block_type}${e.error ? ' x' : ' ok'}`).join(' > ')
+                      ) : h('span', { style: 'flex:1' }),
+                      r.error ? h('span', { style: 'font-size:10px; color:var(--p-node-failed); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap' }, r.error) : null,
+                      h('span', { class: 'material-icons', style: 'font-size:14px; color:var(--p-text-secondary)' }, isOpen ? 'expand_less' : 'expand_more'),
+                    ]),
+                    isOpen && rd ? h('div', { class: 'run-history-item__detail' }, [
+                      rd.error ? h('div', { class: 'run-detail__error', style: 'margin:0 0 8px' }, [
+                        h('span', { class: 'material-icons', style: 'font-size:14px' }, 'error'), rd.error,
+                      ]) : null,
+                      h('div', { class: 'run-detail__blocks' },
+                        ((rd.log && rd.log.length) ? rd.log : Object.keys(rd.block_states || {}).map(bid => ({ uid: bid, ...rd.block_states[bid] }))).map(entry => {
+                          const bid = entry.uid
+                          const isBlockOpen = expandedBlock.value === `${r.id}:${bid}`
+                          const st = entry.status || 'pending'
+                          const statusIcon = st === 'completed' ? 'check_circle' : st === 'failed' ? 'error' : 'pending'
+                          return h('div', { class: 'run-block', key: bid }, [
+                            h('div', {
+                              class: 'run-block__header',
+                              onClick: (e) => { e.stopPropagation(); expandedBlock.value = isBlockOpen ? null : `${r.id}:${bid}` },
+                              style: 'cursor:pointer',
+                            }, [
+                              h('span', { class: 'material-icons', style: `font-size:14px; color:${statusColors[st] || 'var(--p-text-secondary)'}` }, statusIcon),
+                              entry.block_type ? h('code', { style: 'color:var(--p-text-secondary); font-size:9px; margin-right:4px' }, entry.block_type) : null,
+                              h('span', { style: 'font-size:12px' }, entry.label || bid),
+                              h('span', { style: 'flex:1' }),
+                              entry.parcel_count > 1 ? h('span', { style: 'font-size:9px; color:var(--p-text-secondary); margin-right:6px' }, `${entry.parcel_count} parcels`) : null,
+                              entry.duration_ms != null ? h('span', { class: 'run-block__dur', style: 'font-size:10px' }, fmtDur(entry.duration_ms)) : null,
+                            ]),
+                            isBlockOpen ? h('div', { class: 'run-block__detail' }, [
+                              entry.error ? h('div', { class: 'run-block__error' }, entry.error) : null,
+                              (entry.output_summary && Object.keys(entry.output_summary).length) ? h('pre', { class: 'run-block__json', style: 'font-size:10px; max-height:200px' }, JSON.stringify(entry.output_summary, null, 2)) : null,
+                            ]) : null,
+                          ])
+                        }),
+                      ),
+                    ]) : (isOpen ? h('div', { style: 'padding:8px 12px; font-size:11px; color:var(--p-text-secondary)' }, 'Loading...') : null),
+                  ])
+                })),
+        ]) : null,
+      ])
+    }
+
     return () => h('div', { class: 'pipeline-list' }, [
+      // Header with search
       h('div', { class: 'pipeline-list__header' }, [
         h('h2', null, 'Pipelines'),
+        h('div', { class: 'pl-search' }, [
+          h('span', { class: 'material-icons pl-search__icon' }, 'search'),
+          h('input', {
+            class: 'pl-search__input',
+            type: 'text',
+            placeholder: 'Search pipelines...',
+            value: searchQuery.value,
+            onInput: (e) => { searchQuery.value = e.target.value },
+          }),
+          searchQuery.value ? h('button', { class: 'icon-btn pl-search__clear', onClick: () => { searchQuery.value = '' } }, [
+            h('span', { class: 'material-icons', style: 'font-size:14px' }, 'close'),
+          ]) : null,
+        ]),
         h('div', { style: 'flex:1' }),
         h('button', {
           class: 'toolbar-btn' + (catalogOpen.value ? ' toolbar-btn--active' : ''),
           onClick: toggleCatalog,
         }, [
-          h('span', { class: 'material-icons', style: 'font-size:16px' }, 'apps'),
-          ' Samples',
+          h('span', { class: 'material-icons', style: 'font-size:16px' }, 'apps'), ' Samples',
         ]),
         h('button', { class: 'toolbar-btn toolbar-btn--primary', onClick: () => router.push('/editor') }, [
           h('span', { class: 'material-icons', style: 'font-size:16px' }, 'add'), ' New Pipeline',
@@ -532,21 +737,12 @@ const PipelineListPage = defineComponent({
                   h('div', { class: 'catalog-item__info' }, [
                     h('span', { class: 'material-icons catalog-item__icon' }, s.icon),
                     h('div', { style: 'flex:1; min-width:0' }, [
-                      h('div', { class: 'catalog-item__title' }, [
-                        s.title,
-                        s.has_schedule ? h('span', { class: 'trigger-badge', style: 'margin-left:6px' }, 'scheduled') : null,
-                      ]),
+                      h('div', { class: 'catalog-item__title' }, [s.title, s.has_schedule ? h('span', { class: 'trigger-badge', style: 'margin-left:6px' }, 'scheduled') : null]),
                       h('div', { class: 'catalog-item__desc' }, s.description),
                     ]),
                     s.installed
-                      ? h('button', {
-                          class: 'toolbar-btn toolbar-btn--ghost', style: 'padding:3px 8px; font-size:11px',
-                          onClick: () => removeSample(s.key), disabled: busy[s.key],
-                        }, busy[s.key] ? '...' : 'Remove')
-                      : h('button', {
-                          class: 'toolbar-btn toolbar-btn--primary', style: 'padding:3px 8px; font-size:11px',
-                          onClick: () => addSample(s.key), disabled: busy[s.key],
-                        }, busy[s.key] ? '...' : 'Add'),
+                      ? h('button', { class: 'toolbar-btn toolbar-btn--ghost', style: 'padding:3px 8px; font-size:11px', onClick: () => removeSample(s.key), disabled: busy[s.key] }, busy[s.key] ? '...' : 'Remove')
+                      : h('button', { class: 'toolbar-btn toolbar-btn--primary', style: 'padding:3px 8px; font-size:11px', onClick: () => addSample(s.key), disabled: busy[s.key] }, busy[s.key] ? '...' : 'Add'),
                   ]),
                 ])),
               ]),
@@ -560,134 +756,7 @@ const PipelineListPage = defineComponent({
               h('div', { style: 'font-size:16px; margin-top:8px' }, 'No pipelines yet'),
               h('div', { style: 'margin-top:4px' }, 'Create a pipeline or add samples from the catalog'),
             ])
-          : h('div', null, [
-              h('div', { class: 'pipeline-grid' }, pipelines.value.map(p => {
-                const pid = p.id || p._id
-                const sample = isSample(p)
-                const lr = p.latest_run
-                const isRunning = lr && (lr.status === 'running' || lr.status === 'queued')
-                const hasTimer = !!(p.schedule && p.schedule.enabled)
-                const statusClass = isRunning ? ' pipeline-card--running' : lr?.status === 'failed' ? ' pipeline-card--failed' : ''
-                const isExpanded = expandedPipeline.value === pid
-                return h('div', {
-                  class: 'pipeline-card' + (sample ? ' pipeline-card--sample' : '') + statusClass + (isExpanded ? ' pipeline-card--expanded' : ''),
-                  onClick: () => router.push(`/editor/${pid}`),
-                }, [
-                  // Row 1: name + actions
-                  h('div', { style: 'display:flex; align-items:center; gap:6px' }, [
-                    h('div', { class: 'pipeline-card__name', style: 'flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap' }, p.name),
-                    // Run history toggle
-                    h('button', {
-                      class: 'icon-btn', title: 'Run history', style: 'width:24px; height:24px',
-                      onClick: (e) => toggleRunHistory(pid, e),
-                    }, [h('span', { class: 'material-icons', style: 'font-size:14px; color:' + (isExpanded ? 'var(--p-primary)' : 'var(--p-text-secondary)') }, 'history')]),
-                    // Schedule toggle
-                    h('button', {
-                      class: 'icon-btn', title: hasTimer ? 'Disable schedule' : 'No schedule',
-                      style: 'width:24px; height:24px' + (hasTimer ? '' : '; opacity:0.3'),
-                      onClick: (e) => hasTimer ? toggleSchedule(p, e) : e.stopPropagation(),
-                    }, [h('span', { class: 'material-icons', style: 'font-size:14px; color:' + (hasTimer ? 'var(--p-primary)' : 'var(--p-text-secondary)') }, 'timer')]),
-                    h('button', {
-                      class: 'icon-btn', title: 'Delete', style: 'width:24px; height:24px',
-                      onClick: (e) => deletePipeline(pid, e),
-                    }, [h('span', { class: 'material-icons', style: 'font-size:14px; color:var(--p-node-failed)' }, 'delete')]),
-                  ]),
-                  // Row 2: meta
-                  h('div', { class: 'pipeline-card__meta' }, [
-                    `${(p.blocks || []).length} blocks · v${p.version || 1}`,
-                    sample ? h('span', { class: 'sample-badge' }, 'sample') : null,
-                  ]),
-                  // Row 3: status line
-                  (lr || hasTimer) ? h('div', { class: 'pipeline-card__status' }, [
-                    lr ? h('span', {
-                      class: 'pipeline-card__run-status pipeline-card__run-status--' + (lr.status || 'idle'),
-                    }, [
-                      h('span', { class: 'material-icons', style: 'font-size:12px; margin-right:3px' },
-                        isRunning ? 'play_circle' : lr.status === 'completed' ? 'check_circle' : lr.status === 'failed' ? 'error' : 'circle'),
-                      isRunning ? 'Running' : lr.status === 'completed' ? timeAgo(lr.finished_at) : lr.status === 'failed' ? 'Failed ' + timeAgo(lr.finished_at) : lr.status,
-                    ]) : null,
-                    hasTimer ? h('span', { class: 'pipeline-card__schedule-badge' }, [
-                      h('span', { class: 'material-icons', style: 'font-size:11px; margin-right:2px' }, 'timer'),
-                      p.schedule.interval_seconds ? `${p.schedule.interval_seconds}s` : p.schedule.cron_expression || 'scheduled',
-                    ]) : null,
-                  ]) : null,
-                ])
-              })),
-
-              // Expanded run history panel (below the grid)
-              expandedPipeline.value ? h('div', { class: 'run-history-panel' }, [
-                h('div', { class: 'run-history-panel__header' }, [
-                  h('h3', { style: 'margin:0; font-size:14px; color:var(--p-text)' }, [
-                    'Run History — ',
-                    pipelines.value.find(p => (p.id || p._id) === expandedPipeline.value)?.name || 'Pipeline',
-                  ]),
-                  h('button', { class: 'icon-btn', onClick: (e) => { e.stopPropagation(); expandedPipeline.value = null } }, [
-                    h('span', { class: 'material-icons', style: 'font-size:16px' }, 'close'),
-                  ]),
-                ]),
-                runsLoading.value
-                  ? h('div', { style: 'padding:12px; color:var(--p-text-secondary); font-size:12px' }, 'Loading...')
-                  : pipelineRuns.value.length === 0
-                    ? h('div', { style: 'padding:12px; color:var(--p-text-secondary); font-size:12px' }, 'No runs yet')
-                    : h('div', { class: 'run-history-list' }, pipelineRuns.value.map(r => {
-                        const isOpen = expandedRun.value === r.id
-                        const rd = expandedRunDetail.value
-                        const statusColors = { completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', running: 'var(--p-node-running)' }
-
-                        return h('div', { key: r.id, class: 'run-history-item' + (isOpen ? ' run-history-item--open' : '') }, [
-                          // Run row
-                          h('div', { class: 'run-history-item__row', onClick: (e) => toggleRunDetail(r.id, e) }, [
-                            h('span', { class: 'material-icons', style: 'font-size:14px; color:' + (statusColors[r.status] || 'var(--p-text-secondary)') },
-                              r.status === 'completed' ? 'check_circle' : r.status === 'failed' ? 'error' : r.status === 'running' ? 'play_circle' : 'circle'),
-                            h('span', { class: `status-badge status-badge--${r.status}`, style: 'font-size:10px; padding:1px 5px' }, r.status),
-                            h('span', { style: 'font-size:11px; color:var(--p-text-secondary)' }, fmtRunTime(r.created_at)),
-                            fmtRunDur(r) ? h('span', { style: 'font-size:11px; color:var(--p-text-secondary)' }, fmtRunDur(r)) : null,
-                            // Inline log summary
-                            (r.log && r.log.length) ? h('span', { style: 'font-size:10px; color:var(--p-text-secondary); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap' },
-                              r.log.map(e => `${e.label || e.block_type}${e.error ? ' ✗' : ' ✓'}`).join(' → ')
-                            ) : h('span', { style: 'flex:1' }),
-                            r.error ? h('span', { style: 'font-size:10px; color:var(--p-node-failed); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap' }, r.error) : null,
-                            h('span', { class: 'material-icons', style: 'font-size:14px; color:var(--p-text-secondary)' }, isOpen ? 'expand_less' : 'expand_more'),
-                          ]),
-
-                          // Expanded run detail
-                          isOpen && rd ? h('div', { class: 'run-history-item__detail' }, [
-                            // Error banner
-                            rd.error ? h('div', { class: 'run-detail__error', style: 'margin:0 0 8px' }, [
-                              h('span', { class: 'material-icons', style: 'font-size:14px' }, 'error'), rd.error,
-                            ]) : null,
-                            // Block timeline
-                            h('div', { class: 'run-detail__blocks' },
-                              ((rd.log && rd.log.length) ? rd.log : Object.keys(rd.block_states || {}).map(bid => ({ uid: bid, ...rd.block_states[bid] }))).map(entry => {
-                                const bid = entry.uid
-                                const isBlockOpen = expandedBlock.value === `${r.id}:${bid}`
-                                const st = entry.status || 'pending'
-                                const statusIcon = st === 'completed' ? 'check_circle' : st === 'failed' ? 'error' : 'pending'
-                                return h('div', { class: 'run-block', key: bid }, [
-                                  h('div', {
-                                    class: 'run-block__header',
-                                    onClick: (e) => { e.stopPropagation(); expandedBlock.value = isBlockOpen ? null : `${r.id}:${bid}` },
-                                    style: 'cursor:pointer',
-                                  }, [
-                                    h('span', { class: 'material-icons', style: `font-size:14px; color:${statusColors[st] || 'var(--p-text-secondary)'}` }, statusIcon),
-                                    entry.block_type ? h('code', { style: 'color:var(--p-text-secondary); font-size:9px; margin-right:4px' }, entry.block_type) : null,
-                                    h('span', { style: 'font-size:12px' }, entry.label || bid),
-                                    h('span', { style: 'flex:1' }),
-                                    entry.parcel_count > 1 ? h('span', { style: 'font-size:9px; color:var(--p-text-secondary); margin-right:6px' }, `${entry.parcel_count} parcels`) : null,
-                                    entry.duration_ms != null ? h('span', { class: 'run-block__dur', style: 'font-size:10px' }, fmtDur(entry.duration_ms)) : null,
-                                  ]),
-                                  isBlockOpen ? h('div', { class: 'run-block__detail' }, [
-                                    entry.error ? h('div', { class: 'run-block__error' }, entry.error) : null,
-                                    (entry.output_summary && Object.keys(entry.output_summary).length) ? h('pre', { class: 'run-block__json', style: 'font-size:10px; max-height:200px' }, JSON.stringify(entry.output_summary, null, 2)) : null,
-                                  ]) : null,
-                                ])
-                              }),
-                            ),
-                          ]) : (isOpen ? h('div', { style: 'padding:8px 12px; font-size:11px; color:var(--p-text-secondary)' }, 'Loading...') : null),
-                        ])
-                      })),
-              ]) : null,
-            ]),
+          : h('div', { class: 'pl-list' }, filteredPipelines().map(p => renderPipelineRow(p))),
     ])
   },
 })
@@ -833,6 +902,7 @@ const PipelineEditorPage = defineComponent({
       return nodeList.map(n => ({
         uid: n.id, block_type: n.data.blockType, label: n.data.label,
         config: n.data.config || {}, position: n.position || { x: 0, y: 0 },
+        disabled: !!n.data.disabled,
       }))
     }
     function edgesToPipes(edgeList, fmMap) {
@@ -861,7 +931,8 @@ const PipelineEditorPage = defineComponent({
         data: { label: effectiveLabel, blockType, config: config || {}, status: 'idle' },
       }]
 
-      nextTick(() => applyPortColors(editor, dfId, fittings))
+      const catEntry = catalog.value.find(c => c.block_type === blockType)
+      nextTick(() => applyPortColors(editor, dfId, fittings, catEntry))
       return blockUid
     }
 
@@ -877,6 +948,21 @@ const PipelineEditorPage = defineComponent({
       nodes.value = nodes.value.filter(n => n.id !== nodeId)
       edges.value = edges.value.filter(e => e.source !== nodeId && e.target !== nodeId)
       if (selectedNodeId.value === nodeId) selectedNodeId.value = null
+    }
+
+    function toggleBlockDisabled(nodeId) {
+      const node = nodes.value.find(n => n.id === nodeId)
+      if (!node) return
+      const nowDisabled = !node.data.disabled
+      node.data = { ...node.data, disabled: nowDisabled }
+      const dfId = uidToDfId[nodeId]
+      if (dfId != null) {
+        const el = document.querySelector(`#node-${dfId}`)
+        if (el) el.classList.toggle('df-disabled', nowDisabled)
+        const html = nodeHtml(node.data.blockType, node.data.label, node.data.status, nowDisabled)
+        const contentEl = el?.querySelector('.drawflow_content_node')
+        if (contentEl) contentEl.innerHTML = html
+      }
     }
 
     function inferFieldMapping(sourceNodeId, targetNodeId) {
@@ -918,6 +1004,7 @@ const PipelineEditorPage = defineComponent({
     // onConnect handled by Drawflow connectionCreated event (see onMounted)
 
     const selectedEdgeId = ref(null)
+    const ctxMenu = ref(null) // { x, y, nodeId }
 
     function deleteEdge(edgeId) {
       const edge = edges.value.find(e => e.id === edgeId)
@@ -991,13 +1078,17 @@ const PipelineEditorPage = defineComponent({
 
       for (const b of blocks) {
         const fittings = getBlockFittings(catalog.value, b.block_type)
-        const html = nodeHtml(b.block_type, b.label, 'idle')
+        const html = nodeHtml(b.block_type, b.label, 'idle', b.disabled)
         const dfId = editor.addNode(
           b.block_type, fittings.input.length, fittings.output.length,
           b.position?.x || 0, b.position?.y || 0, b.block_type, {}, html
         )
         dfIdToUid[dfId] = b.uid
         uidToDfId[b.uid] = dfId
+        if (b.disabled) {
+          const el = document.querySelector(`#node-${dfId}`)
+          if (el) el.classList.add('df-disabled')
+        }
       }
 
       for (const pipe of pipes) {
@@ -1016,7 +1107,7 @@ const PipelineEditorPage = defineComponent({
 
       nodes.value = blocks.map(b => ({
         id: b.uid, position: { x: b.position?.x || 0, y: b.position?.y || 0 },
-        data: { label: b.label, blockType: b.block_type, config: b.config || {}, status: 'idle' },
+        data: { label: b.label, blockType: b.block_type, config: b.config || {}, status: 'idle', disabled: !!b.disabled },
       }))
 
       Object.keys(edgeFieldMappings).forEach(k => delete edgeFieldMappings[k])
@@ -1032,7 +1123,10 @@ const PipelineEditorPage = defineComponent({
       nextTick(() => {
         for (const b of blocks) {
           const dfId = uidToDfId[b.uid]
-          if (dfId != null) applyPortColors(editor, dfId, getBlockFittings(catalog.value, b.block_type))
+          if (dfId != null) {
+            const catEntry = catalog.value.find(c => c.block_type === b.block_type)
+            applyPortColors(editor, dfId, getBlockFittings(catalog.value, b.block_type), catEntry)
+          }
         }
         for (const pipe of pipes) {
           const srcDfId = uidToDfId[pipe.source_block_uid]
@@ -1137,8 +1231,9 @@ const PipelineEditorPage = defineComponent({
           const sc = { running: 'var(--p-node-running)', completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', idle: 'var(--p-node-idle)' }
           const statusEl = el.querySelector('.block-node__status')
           if (statusEl) statusEl.style.background = sc[status] || sc.idle
-          const blockEl = el.querySelector('.block-node')
-          if (blockEl) blockEl.className = `block-node block-node--${status}`
+          // Apply status class on the drawflow-node wrapper for border styling
+          el.classList.remove('df-status--running', 'df-status--completed', 'df-status--failed')
+          if (status !== 'idle') el.classList.add(`df-status--${status}`)
         }
       }
     }
@@ -1150,8 +1245,7 @@ const PipelineEditorPage = defineComponent({
         if (el) {
           const statusEl = el.querySelector('.block-node__status')
           if (statusEl) statusEl.style.background = 'var(--p-node-idle)'
-          const blockEl = el.querySelector('.block-node')
-          if (blockEl) blockEl.className = 'block-node block-node--idle'
+          el.classList.remove('df-status--running', 'df-status--completed', 'df-status--failed')
         }
       }
     }
@@ -1397,6 +1491,22 @@ const PipelineEditorPage = defineComponent({
           }
         }
       })
+
+      // Right-click context menu on nodes
+      drawflowContainer.addEventListener('contextmenu', (e) => {
+        const nodeEl = e.target.closest('.drawflow-node')
+        if (nodeEl) {
+          e.preventDefault()
+          const dfId = parseInt(nodeEl.id.slice(5))
+          const blockUid = dfIdToUid[dfId]
+          if (blockUid) {
+            ctxMenu.value = { x: e.clientX, y: e.clientY, nodeId: blockUid }
+          }
+        }
+      })
+
+      // Close context menu on click anywhere
+      document.addEventListener('click', () => { ctxMenu.value = null })
     }
 
     onMounted(async () => {
@@ -1693,6 +1803,10 @@ const PipelineEditorPage = defineComponent({
             h('div', { class: 'config-popout__title' }, data.blockType.replace(/_/g, ' ')),
             catalogEntry?.description ? h('div', { class: 'config-popout__desc' }, catalogEntry.description) : null,
           ]),
+          h('button', {
+            class: 'icon-btn', title: data.disabled ? 'Enable block' : 'Disable block',
+            onClick: () => toggleBlockDisabled(node.id),
+          }, [h('span', { class: 'material-icons', style: `font-size:16px; color:${data.disabled ? 'var(--p-node-completed)' : 'var(--p-text-secondary)'}` }, data.disabled ? 'check_circle' : 'block')]),
           h('button', { class: 'icon-btn', title: 'Delete block', onClick: () => deleteNode(node.id) },
             [h('span', { class: 'material-icons', style: 'font-size:16px; color:var(--p-node-failed)' }, 'delete')]),
           h('button', { class: 'icon-btn', title: 'Close', onClick: () => { selectedNodeId.value = null } },
@@ -2133,6 +2247,32 @@ const PipelineEditorPage = defineComponent({
               h('span', { class: 'var-autocomplete__desc' }, v.description),
             ]),
           )) : null,
+
+          // Block right-click context menu
+          ctxMenu.value ? h('div', {
+            class: 'block-ctx-menu',
+            style: { left: ctxMenu.value.x + 'px', top: ctxMenu.value.y + 'px' },
+            onClick: (e) => e.stopPropagation(),
+          }, [
+            (() => {
+              const node = nodes.value.find(n => n.id === ctxMenu.value.nodeId)
+              const isDisabled = node?.data.disabled
+              return h('button', {
+                class: 'block-ctx-menu__item',
+                onClick: () => { toggleBlockDisabled(ctxMenu.value.nodeId); ctxMenu.value = null },
+              }, [
+                h('span', { class: 'material-icons', style: 'font-size:16px' }, isDisabled ? 'check_circle' : 'block'),
+                isDisabled ? 'Enable Block' : 'Disable Block',
+              ])
+            })(),
+            h('button', {
+              class: 'block-ctx-menu__item block-ctx-menu__item--danger',
+              onClick: () => { deleteNode(ctxMenu.value.nodeId); ctxMenu.value = null },
+            }, [
+              h('span', { class: 'material-icons', style: 'font-size:16px' }, 'delete'),
+              'Delete Block',
+            ]),
+          ]) : null,
         ]),
 
       // Console — always visible, resizable like VS Code terminal

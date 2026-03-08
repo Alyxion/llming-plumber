@@ -69,17 +69,58 @@ async def list_pipelines(
             "_id": "$pipeline_id",
             "status": {"$first": "$status"},
             "created_at": {"$first": "$created_at"},
+            "started_at": {"$first": "$started_at"},
             "finished_at": {"$first": "$finished_at"},
             "run_id": {"$first": {"$toString": "$_id"}},
+            "log": {"$first": "$log"},
+            "error": {"$first": "$error"},
         }},
     ]
     async for rdoc in db["runs"].aggregate(pipeline):
         pid = rdoc["_id"]
+        started = rdoc.get("started_at")
+        finished = rdoc.get("finished_at")
+        duration_ms = None
+        if started and finished:
+            try:
+                duration_ms = int((finished - started).total_seconds() * 1000)
+            except Exception:
+                pass
+        # Compact the block log for the list view (strip output_summary)
+        raw_log = rdoc.get("log") or []
+        compact_log = [
+            {
+                "uid": e.get("uid", ""),
+                "block_type": e.get("block_type", ""),
+                "label": e.get("label", ""),
+                "status": e.get("status", ""),
+                "duration_ms": e.get("duration_ms", 0),
+                "parcel_count": e.get("parcel_count", 0),
+                "error": e.get("error"),
+                "output_summary": e.get("output_summary", {}),
+            }
+            for e in raw_log
+        ]
+        def _iso(dt: Any) -> str:
+            """Format datetime as ISO with UTC timezone for JS parsing."""
+            if not dt:
+                return ""
+            if hasattr(dt, "isoformat"):
+                s = dt.isoformat()
+                if "+" not in s and "Z" not in s:
+                    s += "+00:00"
+                return s
+            return str(dt)
+
         latest_runs[pid] = {
             "run_id": rdoc.get("run_id"),
             "status": rdoc.get("status"),
-            "created_at": str(rdoc.get("created_at", "")),
-            "finished_at": str(rdoc.get("finished_at", "")),
+            "created_at": _iso(rdoc.get("created_at")),
+            "started_at": _iso(rdoc.get("started_at")),
+            "finished_at": _iso(rdoc.get("finished_at")),
+            "duration_ms": duration_ms,
+            "log": compact_log,
+            "error": rdoc.get("error"),
         }
 
     # Enrich each pipeline
@@ -184,6 +225,9 @@ async def run_pipeline(
 ) -> dict[str, Any]:
     """Create a Run document and dispatch execution."""
     pipeline_doc = await require_pipeline_access(pipeline_id, db, user)
+
+    if not pipeline_doc.get("enabled", True):
+        raise HTTPException(status_code=409, detail="Pipeline is disabled")
 
     run = Run(
         pipeline_id=pipeline_id,

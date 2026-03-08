@@ -358,6 +358,25 @@ async def run_blocks(
             raise ResourceLimitError(msg)
 
         block_def = block_map[block_uid]
+
+        # Skip disabled blocks — pass upstream parcels through unchanged
+        if block_def.disabled:
+            block_log.append(BlockLogEntry(
+                uid=block_uid, block_type=block_def.block_type,
+                label=block_def.label, status="skipped",
+                duration_ms=0, parcel_count=0,
+            ).model_dump())
+            # Forward incoming parcels so downstream blocks still receive data
+            for pipe in incoming_pipes.get(block_uid, []):
+                for p in parcels.get(pipe.source_block_uid, []):
+                    parcels.setdefault(block_uid, []).append(p)
+            if events:
+                await events.block_done(
+                    block_uid, block_def.block_type, block_def.label,
+                    duration_ms=0, parcel_count=0, status="skipped",
+                )
+            continue
+
         block = BlockRegistry.create(block_def.block_type)
         block_cls = type(block)
         input_type, _output_type = _get_input_output_types(block_cls)

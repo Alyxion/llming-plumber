@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pydantic import Field
 
@@ -14,6 +14,7 @@ from llming_plumber.blocks.base import (
     BlockOutput,
 )
 from llming_plumber.blocks.limits import check_file_size
+from llming_plumber.models.file_ref import FileRef
 
 
 class BlobReadInput(BlockInput):
@@ -53,6 +54,7 @@ class BlobReadOutput(BlockOutput):
     container: str
     etag: str = ""
     last_modified: str = ""
+    file_ref: dict[str, Any] | None = None
 
 
 class BlobReadBlock(BaseBlock[BlobReadInput, BlobReadOutput]):
@@ -87,17 +89,24 @@ class BlobReadBlock(BaseBlock[BlobReadInput, BlobReadOutput]):
                 content = raw.decode(input.encoding)
 
             last_mod = props.get("last_modified")
+            content_type_str = props.get(
+                "content_settings", {},
+            ).get("content_type", "application/octet-stream")
+            file_ref = FileRef.from_bytes(
+                raw,
+                filename=input.blob_name.rsplit("/", 1)[-1],
+                mime_type=content_type_str,
+            )
 
             return BlobReadOutput(
                 content=content,
                 content_length=len(raw),
-                content_type=props.get(
-                    "content_settings", {},
-                ).get("content_type", "application/octet-stream"),
+                content_type=content_type_str,
                 blob_name=input.blob_name,
                 container=input.container,
                 etag=props.get("etag", ""),
                 last_modified=(
                     last_mod.isoformat() if last_mod else ""
                 ),
+                file_ref=file_ref.model_dump(),
             )

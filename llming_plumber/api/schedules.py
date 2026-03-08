@@ -76,6 +76,8 @@ async def update_schedule(
         except (ValueError, KeyError) as exc:
             msg = f"Invalid cron expression: {exc}"
             raise HTTPException(status_code=400, detail=msg)
+    elif schedule.enabled and schedule.interval_seconds and not schedule.next_run_at:
+        schedule.next_run_at = datetime.now(UTC)
 
     doc = model_to_doc(schedule)
     doc.pop("_id", None)

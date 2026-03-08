@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from llming_plumber.models.file_ref import FileRef, file_ref_from_attachment, file_ref_to_attachment
 from llming_plumber.models.log import RunLog
 from llming_plumber.models.mongo_helpers import doc_to_model, model_to_doc
 from llming_plumber.models.ownership import PipelineAccess, Role, Team, TeamMember
@@ -9,12 +10,16 @@ from llming_plumber.models.pipeline import (
     BlockPosition,
     PipeDefinition,
     PipelineDefinition,
+    PipelineDisplay,
 )
 from llming_plumber.models.run import BlockState, Run, RunStatus
 from llming_plumber.models.schedule import Schedule
 
 __all__ = [
     "Attachment",
+    "FileRef",
+    "file_ref_from_attachment",
+    "file_ref_to_attachment",
     "BlockDefinition",
     "BlockPosition",
     "BlockState",
@@ -22,6 +27,7 @@ __all__ = [
     "PipeDefinition",
     "PipelineAccess",
     "PipelineDefinition",
+    "PipelineDisplay",
     "Role",
     "Run",
     "RunLog",

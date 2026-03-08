@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pydantic import Field
 
@@ -13,6 +13,7 @@ from llming_plumber.blocks.base import (
     BlockInput,
     BlockOutput,
 )
+from llming_plumber.models.file_ref import FileRef
 
 
 class BlobWriteInput(BlockInput):
@@ -61,6 +62,11 @@ class BlobWriteInput(BlockInput):
             "options": ["utf-8", "ascii", "latin-1", "binary"],
         },
     )
+    file_ref: dict[str, Any] | None = Field(
+        default=None,
+        title="File Reference",
+        description="FileRef object (alternative to content string)",
+    )
 
 
 class BlobWriteOutput(BlockOutput):
@@ -84,12 +90,25 @@ class BlobWriteBlock(BaseBlock[BlobWriteInput, BlobWriteOutput]):
         input: BlobWriteInput,
         ctx: BlockContext | None = None,
     ) -> BlobWriteOutput:
-        if input.encoding == "binary":
+        if input.file_ref and not input.content:
+            ref = FileRef(**input.file_ref) if isinstance(input.file_ref, dict) else input.file_ref
+            data = ref.decode()
+            blob_name = input.blob_name or ref.filename
+            content_type = (
+                input.content_type
+                if input.content_type != "application/octet-stream"
+                else ref.mime_type
+            )
+        elif input.encoding == "binary":
             import base64
 
             data = base64.b64decode(input.content)
+            blob_name = input.blob_name
+            content_type = input.content_type
         else:
             data = input.content.encode(input.encoding)
+            blob_name = input.blob_name
+            content_type = input.content_type
 
         service = get_blob_service(input.connection_string)
         async with service:
@@ -97,18 +116,18 @@ class BlobWriteBlock(BaseBlock[BlobWriteInput, BlobWriteOutput]):
 
             blob_client = service.get_blob_client(
                 container=input.container,
-                blob=input.blob_name,
+                blob=blob_name,
             )
             result = await blob_client.upload_blob(
                 data,
                 overwrite=input.overwrite,
                 content_settings=ContentSettings(
-                    content_type=input.content_type,
+                    content_type=content_type,
                 ),
             )
 
             return BlobWriteOutput(
-                blob_name=input.blob_name,
+                blob_name=blob_name,
                 container=input.container,
                 etag=result.get("etag", ""),
                 content_length=len(data),

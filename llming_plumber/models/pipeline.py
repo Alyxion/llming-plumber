@@ -22,6 +22,7 @@ class BlockDefinition(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     position: BlockPosition = Field(default_factory=BlockPosition)
     notes: str = ""
+    disabled: bool = False
 
 
 class PipeDefinition(BaseModel):
@@ -37,17 +38,27 @@ class PipeDefinition(BaseModel):
     transform: str | None = None
 
 
+class PipelineDisplay(BaseModel):
+    """Per-pipeline visual customization for the dashboard list."""
+
+    color: str = Field(default="", description="Accent color hex (e.g. '#e67e22'). Empty = theme default.")
+    stat_keys: list[str] = Field(default_factory=list, description="Output summary keys to highlight (e.g. ['file_count', 'row_count'])")
+    icon: str = Field(default="", description="Material icon name override")
+
+
 class PipelineDefinition(BaseModel):
     """A complete pipeline definition with blocks, pipes, and metadata."""
 
     id: str = ""
     name: str
     description: str = ""
+    enabled: bool = Field(default=True, description="Whether this pipeline accepts triggers (schedule, API, manual)")
     blocks: list[BlockDefinition] = Field(default_factory=list)
     pipes: list[PipeDefinition] = Field(default_factory=list)
     version: int = 1
     owner_id: str = ""
     owner_type: Literal["user", "team"] = "user"
     tags: list[str] = Field(default_factory=list)
+    display: PipelineDisplay = Field(default_factory=PipelineDisplay)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

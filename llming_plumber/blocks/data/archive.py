@@ -27,6 +27,7 @@ from llming_plumber.blocks.limits import (
     check_base64_size,
     check_list_size,
 )
+from llming_plumber.models.file_ref import FileRef
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,11 @@ class ZipCreateInput(BlockInput):
         ),
         json_schema_extra={"widget": "textarea", "rows": 6},
     )
+    file_refs: list[dict[str, Any]] = Field(
+        default_factory=list,
+        title="File References",
+        description="List of FileRef objects (alternative to JSON files string)",
+    )
     archive_name: str = Field(
         default="archive.zip",
         title="Archive Name",
@@ -58,20 +64,30 @@ class ZipCreateOutput(BlockOutput):
     size_bytes: int = 0
 
 
-def _create_zip(files_json: str, archive_name: str) -> ZipCreateOutput:
+def _create_zip(
+    files_json: str,
+    archive_name: str,
+    file_refs: list[dict[str, Any]] | None = None,
+) -> ZipCreateOutput:
     """Synchronous zip creation (runs in a thread)."""
-    entries: list[dict[str, Any]] = json.loads(files_json)
     buf = io.BytesIO()
+    count = 0
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for entry in entries:
-            name = entry["name"]
-            data = base64.b64decode(entry["content_base64"])
-            zf.writestr(name, data)
+        if file_refs:
+            for ref_dict in file_refs:
+                ref = FileRef.from_dict(ref_dict) if not isinstance(ref_dict, FileRef) else ref_dict
+                zf.writestr(ref.filename, ref.decode())
+                count += 1
+        else:
+            entries: list[dict[str, Any]] = json.loads(files_json)
+            for entry in entries:
+                zf.writestr(entry["name"], base64.b64decode(entry["content_base64"]))
+                count += 1
     raw = buf.getvalue()
     return ZipCreateOutput(
         archive_base64=base64.b64encode(raw).decode(),
         archive_name=archive_name,
-        file_count=len(entries),
+        file_count=count,
         size_bytes=len(raw),
     )
 
@@ -87,21 +103,32 @@ class ZipCreateBlock(BaseBlock[ZipCreateInput, ZipCreateOutput]):
         input: ZipCreateInput,
         ctx: BlockContext | None = None,
     ) -> ZipCreateOutput:
-        try:
-            entries: list[dict[str, Any]] = json.loads(input.files)
-            check_list_size(entries, label="Zip entries")
-            for entry in entries:
-                check_base64_size(
-                    entry.get("content_base64", ""),
-                    label=entry.get("name", "file"),
-                )
-        except json.JSONDecodeError as exc:
-            logger.error("zip_create: invalid JSON input: %s", exc)
-            return ZipCreateOutput(archive_name=input.archive_name)
+        use_refs = bool(input.file_refs)
+
+        if use_refs:
+            check_list_size(input.file_refs, label="Zip entries")
+            for ref_dict in input.file_refs:
+                ref = FileRef.from_dict(ref_dict) if not isinstance(ref_dict, FileRef) else ref_dict
+                check_base64_size(ref.data, label=ref.filename or "file")
+        else:
+            try:
+                entries: list[dict[str, Any]] = json.loads(input.files)
+                check_list_size(entries, label="Zip entries")
+                for entry in entries:
+                    check_base64_size(
+                        entry.get("content_base64", ""),
+                        label=entry.get("name", "file"),
+                    )
+            except json.JSONDecodeError as exc:
+                logger.error("zip_create: invalid JSON input: %s", exc)
+                return ZipCreateOutput(archive_name=input.archive_name)
 
         try:
             result = await asyncio.to_thread(
-                _create_zip, input.files, input.archive_name,
+                _create_zip,
+                input.files,
+                input.archive_name,
+                file_refs=input.file_refs if use_refs else None,
             )
         except Exception:
             logger.exception("zip_create: failed to build archive")
@@ -136,6 +163,7 @@ class ZipExtractInput(BlockInput):
 
 class ZipExtractOutput(BlockOutput):
     files: list[dict[str, Any]] = []
+    file_refs: list[dict[str, Any]] = []
     file_count: int = 0
 
 
@@ -147,6 +175,7 @@ def _extract_zip(
     buf = io.BytesIO(raw)
     pwd = password.encode() if password else None
     files: list[dict[str, Any]] = []
+    file_refs: list[dict[str, Any]] = []
     with zipfile.ZipFile(buf, "r") as zf:
         for info in zf.infolist():
             if info.is_dir():
@@ -157,7 +186,9 @@ def _extract_zip(
                 "content_base64": base64.b64encode(data).decode(),
                 "size_bytes": len(data),
             })
-    return ZipExtractOutput(files=files, file_count=len(files))
+            file_ref = FileRef.from_bytes(data, filename=info.filename)
+            file_refs.append(file_ref.model_dump())
+    return ZipExtractOutput(files=files, file_refs=file_refs, file_count=len(files))
 
 
 class ZipExtractBlock(BaseBlock[ZipExtractInput, ZipExtractOutput]):

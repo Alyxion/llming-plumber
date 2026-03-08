@@ -25,7 +25,7 @@ def model_to_doc(model: BaseModel) -> dict[str, Any]:
     ``_id: ObjectId``.  An empty or missing ``id`` is omitted so MongoDB
     will auto-generate an ``_id``.
     """
-    data = model.model_dump(mode="json")
+    data = model.model_dump(mode="python")
     id_value = data.pop("id", None)
     if id_value:
         data["_id"] = ObjectId(id_value)

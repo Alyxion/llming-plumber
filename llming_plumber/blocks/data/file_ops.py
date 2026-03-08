@@ -24,6 +24,7 @@ from pydantic import Field
 
 from llming_plumber.blocks.base import BaseBlock, BlockContext, BlockInput, BlockOutput
 from llming_plumber.blocks.limits import check_file_size, check_list_size
+from llming_plumber.models.file_ref import FileRef
 
 logger = logging.getLogger(__name__)
 
@@ -142,25 +143,27 @@ class FileReadOutput(BlockOutput):
     path: str = ""
     size_bytes: int = 0
     encoding: str = ""
+    file_ref: FileRef | None = None
 
 
 def _read_file(path: str, encoding: str) -> FileReadOutput:
     """Synchronous file read (runs in a thread)."""
     p = pathlib.Path(path)
-    size = p.stat().st_size
-    check_file_size(size, label=p.name)
+    raw = p.read_bytes()  # always read raw for FileRef
+    check_file_size(len(raw), label=p.name)
+    file_ref = FileRef.from_bytes(raw, filename=p.name)
 
     if encoding == "binary":
-        raw = p.read_bytes()
         content = base64.b64encode(raw).decode()
     else:
-        content = p.read_text(encoding=encoding)
+        content = raw.decode(encoding)
 
     return FileReadOutput(
         content=content,
         path=str(p),
-        size_bytes=size,
+        size_bytes=len(raw),
         encoding=encoding,
+        file_ref=file_ref,
     )
 
 
@@ -200,10 +203,12 @@ class FileReadBlock(BaseBlock[FileReadInput, FileReadOutput]):
 
 class FileWriteInput(BlockInput):
     path: str = Field(
+        default="",
         title="File Path",
         description="Absolute path for the output file",
     )
     content: str = Field(
+        default="",
         title="Content",
         description="Content to write (text or base64 for binary)",
         json_schema_extra={"widget": "textarea", "rows": 6},
@@ -219,6 +224,11 @@ class FileWriteInput(BlockInput):
         description="Create parent directories if they don't exist",
         json_schema_extra={"widget": "toggle"},
     )
+    file_ref: FileRef | None = Field(
+        default=None,
+        title="File Reference",
+        description="FileRef to write; used as fallback when content is empty",
+    )
 
 
 class FileWriteOutput(BlockOutput):
@@ -228,7 +238,11 @@ class FileWriteOutput(BlockOutput):
 
 
 def _write_file(
-    path: str, content: str, encoding: str, mkdir: bool,
+    path: str,
+    content: str,
+    encoding: str,
+    mkdir: bool,
+    binary_data: bytes | None = None,
 ) -> FileWriteOutput:
     """Synchronous file write (runs in a thread)."""
     p = pathlib.Path(path)
@@ -237,7 +251,10 @@ def _write_file(
     if mkdir:
         p.parent.mkdir(parents=True, exist_ok=True)
 
-    p.write_text(content, encoding=encoding)
+    if binary_data is not None:
+        p.write_bytes(binary_data)
+    else:
+        p.write_text(content, encoding=encoding)
     size = p.stat().st_size
 
     return FileWriteOutput(
@@ -258,22 +275,33 @@ class FileWriteBlock(BaseBlock[FileWriteInput, FileWriteOutput]):
         input: FileWriteInput,
         ctx: BlockContext | None = None,
     ) -> FileWriteOutput:
+        content = input.content
+        path = input.path
+        binary_data: bytes | None = None
+
+        # Fall back to file_ref when content is empty
+        if not content and input.file_ref is not None:
+            binary_data = input.file_ref.decode()
+            if not path:
+                path = input.file_ref.filename
+
         try:
             result = await asyncio.to_thread(
                 _write_file,
-                input.path,
-                input.content,
+                path,
+                content,
                 input.encoding,
                 input.mkdir,
+                binary_data,
             )
         except Exception:
-            logger.exception("file_write: failed to write %s", input.path)
-            return FileWriteOutput(path=input.path)
+            logger.exception("file_write: failed to write %s", path)
+            return FileWriteOutput(path=path)
 
         if ctx:
             verb = "Created" if result.created else "Updated"
             await ctx.log(
-                f"{verb} {input.path} ({result.size_bytes:,} bytes)"
+                f"{verb} {path} ({result.size_bytes:,} bytes)"
             )
         return result
 
@@ -294,6 +322,7 @@ class FileCollectorInput(BlockInput):
 class FileCollectorOutput(BlockOutput):
     files: list[dict[str, Any]] = []
     count: int = 0
+    file_refs: list[FileRef] = []
 
 
 class FileCollectorBlock(BaseBlock[FileCollectorInput, FileCollectorOutput]):
@@ -311,9 +340,19 @@ class FileCollectorBlock(BaseBlock[FileCollectorInput, FileCollectorOutput]):
         ctx: BlockContext | None = None,
     ) -> FileCollectorOutput:
         check_list_size(input.items, label="File collector items")
+
+        file_refs: list[FileRef] = []
+        for item in input.items:
+            if isinstance(item, dict) and ("filename" in item or "name" in item):
+                try:
+                    file_refs.append(FileRef.from_dict(item))
+                except (ValueError, Exception):  # noqa: BLE001
+                    pass
+
         result = FileCollectorOutput(
             files=input.items,
             count=len(input.items),
+            file_refs=file_refs,
         )
         if ctx:
             await ctx.log(f"Collected {result.count} file entry/entries")
