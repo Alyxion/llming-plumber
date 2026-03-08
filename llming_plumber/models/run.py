@@ -25,6 +25,19 @@ class BlockState(BaseModel):
     duration_ms: float | None = None
 
 
+class BlockLogEntry(BaseModel):
+    """Compact summary of one block's execution, stored inline on the Run."""
+
+    uid: str = ""
+    block_type: str = ""
+    label: str = ""
+    status: str = ""
+    duration_ms: float = 0
+    parcel_count: int = 0
+    output_summary: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+
+
 class Run(BaseModel):
     """A single execution of a pipeline."""
 
@@ -44,6 +57,9 @@ class Run(BaseModel):
     block_states: dict[str, BlockState] = Field(default_factory=dict)
     input: dict[str, Any] = Field(default_factory=dict)
     output: dict[str, Any] | None = None
+
+    # Compact inline log — block-level summaries for quick review
+    log: list[BlockLogEntry] = Field(default_factory=list)
 
     debug: bool = False
 

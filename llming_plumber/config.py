@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     lemming_concurrency: int = 4
     run_timeout: int = 3600
     health_check_interval: int = 30
+    scheduler_poll_seconds: int = 2
+    max_runs_per_pipeline: int = 50
 
     # API
     api_prefix: str = "/api"

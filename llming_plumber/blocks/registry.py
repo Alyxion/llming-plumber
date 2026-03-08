@@ -9,9 +9,19 @@ from typing import Any, ClassVar, get_args
 
 from pydantic import BaseModel
 
-from llming_plumber.blocks.base import BaseBlock, BlockInput, BlockOutput
+from llming_plumber.blocks.base import BaseBlock, BlockInput, BlockOutput, FittingDescriptor
 
 logger = logging.getLogger(__name__)
+
+
+class FittingMeta(BaseModel):
+    """Fitting descriptor for the block catalog API."""
+
+    uid: str
+    label: str
+    kind: str
+    color: str = ""
+    description: str = ""
 
 
 class BlockMeta(BaseModel):
@@ -25,6 +35,8 @@ class BlockMeta(BaseModel):
     llm_tier: str | None = None
     input_schema: dict[str, Any]
     output_schema: dict[str, Any]
+    input_fittings: list[FittingMeta] = []
+    output_fittings: list[FittingMeta] = []
 
 
 def _get_type_args(
@@ -166,6 +178,18 @@ class BlockRegistry:
                 input_schema = input_t.model_json_schema()
                 output_schema = output_t.model_json_schema()
 
+            # Build fitting metadata
+            raw_in: list[FittingDescriptor] = getattr(block_cls, "input_fittings", [])
+            raw_out: list[FittingDescriptor] = getattr(block_cls, "output_fittings", [])
+            in_fittings = [
+                FittingMeta(uid=f.uid, label=f.label, kind="input", color=f.color, description=f.description)
+                for f in raw_in
+            ]
+            out_fittings = [
+                FittingMeta(uid=f.uid, label=f.label, kind="output", color=f.color, description=f.description)
+                for f in raw_out
+            ]
+
             result.append(
                 BlockMeta(
                     block_type=block_type,
@@ -176,6 +200,8 @@ class BlockRegistry:
                     llm_tier=getattr(block_cls, "llm_tier", None),
                     input_schema=input_schema,
                     output_schema=output_schema,
+                    input_fittings=in_fittings,
+                    output_fittings=out_fittings,
                 )
             )
         return result

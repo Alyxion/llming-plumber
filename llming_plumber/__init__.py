@@ -69,10 +69,15 @@ def _lifespan(mode: str) -> Any:
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> Any:  # type: ignore[misc]
+        import asyncio
+        import logging
+
         from arq.connections import RedisSettings, create_pool
 
         from llming_plumber.blocks.registry import BlockRegistry
         from llming_plumber.db import close_connections, ensure_indexes, get_database
+
+        logger = logging.getLogger("llming_plumber")
 
         # --- startup ---
         BlockRegistry.discover()
@@ -80,17 +85,59 @@ def _lifespan(mode: str) -> Any:
         db = get_database()
         await ensure_indexes(db)
 
+        # Cancel stale queued/running runs from previous crashes
+        stale = await db["runs"].update_many(
+            {"status": {"$in": ["queued", "running"]}},
+            {"$set": {"status": "cancelled", "error": "Stale run cancelled on startup"}},
+        )
+        if stale.modified_count:
+            logger.info("Cancelled %d stale runs from previous session", stale.modified_count)
+
         if mode in ("all", "ui"):
             app.state.arq_pool = await create_pool(
                 RedisSettings.from_dsn(settings.redis_url)
             )
         else:
-            # Worker-only mode: no ARQ pool needed on the HTTP side
             app.state.arq_pool = None
+
+        # In all/ui mode, run the scheduler loop + inline worker in-process
+        scheduler_task = None
+        if mode in ("all", "ui"):
+            from llming_plumber.worker.scheduler import check_schedules
+
+            async def _dispatch_run(run_id: str) -> None:
+                """Dispatch a scheduled run inline (no separate worker needed)."""
+                from llming_plumber.worker.executor import execute_pipeline
+                asyncio.create_task(
+                    execute_pipeline(
+                        {"db": db, "lemming_id": "inline"},
+                        run_id=run_id,
+                    )
+                )
+
+            async def _scheduler_loop() -> None:
+                poll = settings.scheduler_poll_seconds
+                ctx: dict[str, Any] = {
+                    "db": db,
+                    "redis": app.state.arq_pool,
+                    "pool": app.state.arq_pool,
+                    "dispatch_run": _dispatch_run,
+                }
+                logger.info("In-process scheduler started (every %ds)", poll)
+                while True:
+                    try:
+                        await check_schedules(ctx)
+                    except Exception:
+                        logger.exception("Scheduler iteration failed")
+                    await asyncio.sleep(poll)
+
+            scheduler_task = asyncio.create_task(_scheduler_loop())
 
         yield
 
         # --- shutdown ---
+        if scheduler_task:
+            scheduler_task.cancel()
         if app.state.arq_pool is not None:
             await app.state.arq_pool.aclose()
         await close_connections()

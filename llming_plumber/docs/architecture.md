@@ -172,8 +172,13 @@ db.plumber.runs.createIndex({ status: 1, created_at: -1 })
 db.plumber.runs.createIndex({ pipeline_id: 1, created_at: -1 })
 db.plumber.runs.createIndex({ lemming_id: 1, status: 1 })
 
+// runs — auto-expire completed runs (default 30 days)
+db.plumber.runs.createIndex({ finished_at: 1 }, { expireAfterSeconds: 2592000 })
+
 // run_logs — query logs for a specific run, ordered
 db.plumber.run_logs.createIndex({ run_id: 1, ts: 1 })
+// run_logs — auto-expire old logs (default 7 days)
+db.plumber.run_logs.createIndex({ ts: 1 }, { expireAfterSeconds: 604800 })
 
 // schedules — find enabled schedules
 db.plumber.schedules.createIndex({ enabled: 1 })
@@ -238,6 +243,46 @@ db.plumber.schedules.createIndex({ enabled: 1 })
   tags: ["nightly", "import"],
 }
 ```
+
+---
+
+## Live Run Events (Redis pub/sub → SSE)
+
+The UI **never executes pipelines**. All execution happens on the backend
+(ARQ worker or in-process fallback). The UI only triggers runs and
+observes progress.
+
+```
+  UI (browser)                     API server                  Worker (lemming)
+  ───────────                      ──────────                  ────────────────
+  Click "Run"
+    │
+    ├── POST /pipelines/{id}/run ─► create Run doc (queued)
+    │                               enqueue ARQ job ──────────► claim run
+    │                               (or inline bg task)         │
+    │                                                           ├─► publish "start"
+    ├── GET /runs/{id}/events ───► subscribe Redis pub/sub     ├─► publish "block_start"
+    │   (EventSource / SSE)         channel: plumber:run:{id}  ├─► publish "block_done"
+    │                               :events                    ├─► publish "block_done"
+    │  ◄── SSE events ◄──────────── forward from Redis ◄───────┤
+    │                                                           └─► publish "done"
+    │  update node statuses,
+    │  flash edges, show logs
+```
+
+**Channel**: `plumber:run:{run_id}:events`
+**Events**: `start`, `block_start`, `block_done`, `error`, `done`
+
+When no ARQ worker is running (dev mode), the API server runs the
+pipeline as a background asyncio task using the same executor + event
+publisher.
+
+### Auto-scheduling from timer_trigger
+
+When a pipeline is saved with a `timer_trigger` block that has
+`interval_seconds > 0` or a `cron_expression`, a Schedule document
+is automatically created/updated (tagged `_auto_timer`). The ARQ
+scheduler picks this up and triggers runs on the configured cadence.
 
 ---
 
@@ -386,36 +431,37 @@ async def run_pipeline(pipeline_id: str, request: Request):
 Schedules are stored in MongoDB. ARQ's built-in cron runs a check every
 minute that scans for due schedules and enqueues them:
 
+Supports three schedule types:
+
+- **Cron** (`cron_expression`): classic cron syntax, e.g. `0 8 * * *`
+- **Interval** (`interval_seconds`): run every N seconds, e.g. 30
+- **Time windows** (`time_windows`): restrict when the schedule is active
+  (e.g. Mon-Fri 08:00-18:00). `interval_multiplier_off_hours` scales
+  the interval outside windows (e.g. 4.0 = 4x slower at night).
+
 ```python
 async def check_schedules(ctx: dict):
     """ARQ cron — runs every minute. Finds due schedules, enqueues runs."""
     db = ctx["db"]
-    now = datetime.utcnow()
-    pool = ctx["redis"]  # ARQ provides this
+    now = datetime.now(UTC)
+    pool = ctx["redis"]
 
     async for schedule in db.plumber.schedules.find({
         "enabled": True,
         "next_run_at": {"$lte": now},
     }):
-        # Create run doc
-        run_doc = {
-            "pipeline_id": schedule["pipeline_id"],
-            "status": "queued",
-            "created_at": now,
-            "attempt": 0,
-            "tags": schedule.get("tags", []),
-        }
-        result = await db.plumber.runs.insert_one(run_doc)
+        # Skip if outside time windows
+        if not _in_time_window(now, schedule.get("time_windows", [])):
+            continue
 
-        # Enqueue
-        await pool.enqueue_job("execute_pipeline", run_id=str(result.inserted_id))
+        # Create run + enqueue ...
 
-        # Advance next_run_at
-        next_run = compute_next_run(schedule["cron_expression"], now)
-        await db.plumber.schedules.update_one(
-            {"_id": schedule["_id"]},
-            {"$set": {"next_run_at": next_run, "last_run_at": now}},
-        )
+        # Advance next_run_at (cron OR interval)
+        if schedule.get("cron_expression"):
+            next_run = compute_next_run(schedule["cron_expression"], now)
+        elif schedule.get("interval_seconds"):
+            next_run = _compute_next_interval(schedule, now)
+        ...
 ```
 
 ---

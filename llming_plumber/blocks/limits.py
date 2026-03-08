@@ -104,6 +104,12 @@ be written to MongoDB unless explicitly opted in."""
 MAX_ERROR_MESSAGE_LENGTH: int = _env_int("MAX_ERROR_MESSAGE_LENGTH", 2000)
 """Truncate error messages stored in MongoDB to this length."""
 
+RUN_LOG_TTL_DAYS: int = _env_int("RUN_LOG_TTL_DAYS", 7)
+"""Auto-expire RunLog documents after this many days (default 7)."""
+
+RUN_TTL_DAYS: int = _env_int("RUN_TTL_DAYS", 30)
+"""Auto-expire completed Run documents after this many days (default 30)."""
+
 # ------------------------------------------------------------------
 # Debug trace (Redis)
 # ------------------------------------------------------------------

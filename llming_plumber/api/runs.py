@@ -33,7 +33,13 @@ async def list_runs(
     cursor = db["runs"].find(query).sort("created_at", -1).skip(skip).limit(limit)
     results: list[dict[str, Any]] = []
     async for doc in cursor:
-        results.append(doc_to_model(doc, Run).model_dump(mode="json"))
+        run = doc_to_model(doc, Run).model_dump(mode="json")
+        # Strip output_summary from inline log entries for list view (keep labels + status)
+        for entry in run.get("log", []):
+            entry.pop("output_summary", None)
+        # Strip block_states from list view (detailed, use run detail endpoint)
+        run.pop("block_states", None)
+        results.append(run)
     return results
 
 

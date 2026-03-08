@@ -5,6 +5,7 @@ from typing import Any
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import ASCENDING, DESCENDING
 
+from llming_plumber.blocks.limits import RUN_LOG_TTL_DAYS, RUN_TTL_DAYS
 from llming_plumber.config import settings
 
 _motor_client: AsyncIOMotorClient | None = None  # type: ignore[type-arg]
@@ -65,10 +66,21 @@ async def ensure_indexes(
         [("lemming_id", ASCENDING), ("status", ASCENDING)],
     )
 
+    # Runs — TTL on finished_at for automatic cleanup
+    await runs.create_index(
+        "finished_at",
+        expireAfterSeconds=RUN_TTL_DAYS * 86400,
+    )
+
     # Run logs
     run_logs = db["run_logs"]
     await run_logs.create_index(
         [("run_id", ASCENDING), ("ts", ASCENDING)],
+    )
+    # TTL on ts for automatic cleanup
+    await run_logs.create_index(
+        "ts",
+        expireAfterSeconds=RUN_LOG_TTL_DAYS * 86400,
     )
 
     # Schedules

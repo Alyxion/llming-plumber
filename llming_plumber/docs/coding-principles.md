@@ -77,6 +77,8 @@ Every constant can be overridden via an environment variable prefixed with
 | Documents | `MAX_SLIDES` | 200 | Max PowerPoint slides |
 | Logging | `MAX_RUN_LOG_ENTRIES` | 50 | Max log entries per run in MongoDB |
 | Logging | `LOG_BLOCK_OUTPUT` | off | Whether to persist block output data |
+| Logging | `RUN_LOG_TTL_DAYS` | 7 | Auto-expire run log documents after N days |
+| Logging | `RUN_TTL_DAYS` | 30 | Auto-expire completed run documents after N days |
 | Debug | `DEBUG_TTL_SECONDS` | 3,600 | TTL for debug trace keys in Redis |
 | Console | `CONSOLE_TTL_SECONDS` | 3,600 | TTL for console entries in Redis |
 | Console | `CONSOLE_MAX_ENTRIES` | 5,000 | Max console entries per run |

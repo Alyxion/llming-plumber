@@ -6660,7 +6660,8 @@ function useActions(state, nodeLookup, edgeLookup) {
 const _hoisted_1$9 = ["data-id", "data-handleid", "data-nodeid", "data-handlepos"];
 const __default__$f = {
   name: "Handle",
-  compatConfig: { MODE: 3 }
+  compatConfig: { MODE: 3 },
+  inheritAttrs: false
 };
 const _sfc_main$f = /* @__PURE__ */ defineComponent({
   ...__default__$f,
@@ -6673,8 +6674,9 @@ const _sfc_main$f = /* @__PURE__ */ defineComponent({
     connectableStart: { type: Boolean, default: true },
     connectableEnd: { type: Boolean, default: true }
   },
-  setup(__props, { expose: __expose }) {
+  setup(__props, { expose: __expose, attrs: __attrs }) {
     const props = createPropsRestProxy(__props, ["position", "connectable", "connectableStart", "connectableEnd", "id"]);
+    const handleAttrs = __attrs;
     const type = toRef(() => props.type ?? "source");
     const isValidConnection = toRef(() => props.isValidConnection ?? null);
     const {
@@ -6804,14 +6806,17 @@ const _sfc_main$f = /* @__PURE__ */ defineComponent({
             connectablestart: isConnectableStart.value,
             connectableend: isConnectableEnd.value,
             connectionindicator: isConnectable.value && (isConnectableStart.value && !isConnecting.value || isConnectableEnd.value && isConnecting.value)
-          }
+          },
+          handleAttrs.class || ''
         ]]),
+        style: normalizeStyle(handleAttrs.style || null),
+        title: handleAttrs.title || null,
         onMousedown: onPointerDown,
         onTouchstartPassive: onPointerDown,
         onClick
       }, [
         renderSlot(_ctx.$slots, "default", { id: _ctx.id })
-      ], 42, _hoisted_1$9);
+      ], 46, _hoisted_1$9);
     };
   }
 });

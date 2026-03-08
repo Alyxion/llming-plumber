@@ -2,18 +2,31 @@
  * Plumber UI — zero-build entry point.
  *
  * Uses Vue (global) + Quasar (UMD) loaded via <script> tags,
- * and Vue Flow / Pinia via importmap ESM modules.
+ * and Drawflow / Pinia via importmap ESM modules.
  * All dependencies vendored locally — no npm, no CDN.
  */
 
 import { createRouter, createWebHistory } from 'vue-router'
 import { createPinia } from 'pinia'
-import { VueFlow, useVueFlow, Position, MarkerType } from '@vue-flow/core'
 import { getAllThemes, getTheme, applyTheme } from './themes/index.js'
+
+// Drawflow loaded via <script> tag (UMD → window.Drawflow is the constructor)
+const DrawflowLib = window.Drawflow
 
 const { createApp, ref, reactive, computed, onMounted, watch, h, defineComponent, markRaw, nextTick, toRaw } = Vue
 
 const IMAGINARY_OWNER = 'plumber-dev-user'
+
+// ---------- Session ----------
+
+const userHandle = ref('')
+async function fetchSession() {
+  try {
+    const data = await api('GET', '/me')
+    userHandle.value = data.handle
+  } catch {}
+}
+fetchSession()
 
 // ---------- API helper ----------
 
@@ -47,7 +60,7 @@ const BLOCK_ICONS = {
   xml_parser: 'code', html_extractor: 'web', regex_extractor: 'text_snippet',
   hash_generator: 'tag', base64_codec: 'lock', deduplicator: 'filter_none',
   split_text: 'content_cut', column_mapper: 'view_column',
-  datetime_formatter: 'schedule', safe_eval: 'calculate',
+  timer_trigger: 'timer', datetime_formatter: 'schedule', safe_eval: 'calculate',
   pdf_reader: 'picture_as_pdf', excel_reader: 'table_chart',
   word_reader: 'description', word_writer: 'description',
   news_api: 'newspaper', dwd_weather: 'cloud',
@@ -55,6 +68,23 @@ const BLOCK_ICONS = {
   pegel_online: 'water', azure_blob_write: 'cloud_upload',
   azure_blob_read: 'cloud_download', azure_blob_list: 'folder',
   azure_blob_delete: 'delete', azure_blob_trigger: 'bolt',
+  manual_trigger: 'play_circle', read_cache: 'saved_search', store_cache: 'archive',
+  variable_store: 'inventory_2', set_variables: 'tune',
+  // MongoDB
+  mongo_find: 'search', mongo_find_one: 'find_in_page', mongo_insert: 'add_circle',
+  mongo_update: 'edit', mongo_delete: 'delete_sweep', mongo_aggregate: 'analytics',
+  mongo_count: 'tag', mongo_watch: 'visibility',
+  // Redis
+  redis_get: 'download', redis_set: 'upload', redis_delete: 'remove_circle',
+  redis_list_push: 'playlist_add', redis_list_pop: 'playlist_remove',
+  redis_list_range: 'view_list', redis_publish: 'campaign',
+  redis_subscribe: 'notifications', redis_hash_get: 'dataset',
+  redis_hash_set: 'dataset_linked', redis_keys: 'vpn_key', redis_incr: 'exposure_plus_1',
+  // Archive
+  zip_create: 'folder_zip', zip_extract: 'unarchive', zip_list: 'list_alt',
+  // Files
+  file_list: 'folder_open', file_read: 'file_open', file_write: 'save',
+  file_collector: 'create_new_folder', file_move: 'drive_file_move', file_delete: 'delete_forever',
 }
 function blockIcon(bt) { return BLOCK_ICONS[bt] || 'extension' }
 
@@ -203,49 +233,125 @@ const PRESETS = [
   },
 ]
 
-// ---------- Convert pipeline model ↔ Vue Flow nodes/edges ----------
+// ---------- Drawflow helpers ----------
 
-function blocksToNodes(blocks) {
-  return blocks.map(b => ({
-    id: b.uid, type: 'block',
-    position: { x: b.position?.x || 0, y: b.position?.y || 0 },
-    data: { label: b.label, blockType: b.block_type, config: b.config || {}, status: 'idle' },
-    sourcePosition: Position.Right, targetPosition: Position.Left,
-  }))
-}
 function _fmKey(source, target) { return `${source}→${target}` }
 
-function pipesToEdges(pipes, edgeFieldMappings) {
-  return pipes.map(p => {
-    if (p.field_mapping) {
-      const key = _fmKey(p.source_block_uid, p.target_block_uid)
-      edgeFieldMappings[key] = p.field_mapping
-    }
-    return {
-      id: p.uid, source: p.source_block_uid, target: p.target_block_uid,
-      sourceHandle: p.source_fitting_uid, targetHandle: p.target_fitting_uid,
-      type: 'smoothstep', animated: false,
-      style: { stroke: 'var(--p-edge-default)', strokeWidth: 2 },
-      markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--p-edge-default)' },
+function getBlockCatalogEntry(catalogEntries, blockType) {
+  return catalogEntries.find(c => c.block_type === blockType) || null
+}
+
+function getBlockFittings(catalogEntries, blockType) {
+  const entry = getBlockCatalogEntry(catalogEntries, blockType)
+  return {
+    input: entry?.input_fittings?.length
+      ? entry.input_fittings
+      : [{ uid: 'input', label: 'Input', color: '', description: '' }],
+    output: entry?.output_fittings?.length
+      ? entry.output_fittings
+      : [{ uid: 'output', label: 'Output', color: '', description: '' }],
+  }
+}
+
+function fittingUidToPort(fittings, fittingUid, prefix) {
+  const idx = fittings.findIndex(f => f.uid === fittingUid)
+  return idx >= 0 ? `${prefix}_${idx + 1}` : `${prefix}_1`
+}
+
+function portToFittingUid(fittings, portClass) {
+  const match = portClass.match(/(\d+)/)
+  const idx = match ? parseInt(match[1]) - 1 : 0
+  return fittings[idx]?.uid || (portClass.startsWith('input') ? 'input' : 'output')
+}
+
+function nodeHtml(blockType, label, status) {
+  const icon = blockIcon(blockType)
+  const sc = { running: 'var(--p-node-running)', completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', idle: 'var(--p-node-idle)' }
+  return `<div class="block-node block-node--${status || 'idle'}">
+    <div class="block-node__status" style="background:${sc[status] || sc.idle}"></div>
+    <div class="block-node__content">
+      <span class="material-icons block-node__icon">${icon}</span>
+      <div>
+        <div class="block-node__label">${label}</div>
+        <div class="block-node__type">${blockType}</div>
+      </div>
+    </div>
+  </div>`
+}
+
+function applyPortColors(editor, dfId, fittings) {
+  const nodeEl = document.getElementById(`node-${dfId}`)
+  if (!nodeEl) return
+  fittings.output.forEach((f, i) => {
+    if (f.color) {
+      const portEl = nodeEl.querySelector(`.output.output_${i + 1}`)
+      if (portEl) { portEl.style.background = f.color; portEl.style.borderColor = f.color }
     }
   })
-}
-function nodesToBlocks(nodes) {
-  return nodes.map(n => ({
-    uid: n.id, block_type: n.data.blockType, label: n.data.label,
-    config: n.data.config || {},
-    position: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
-  }))
-}
-function edgesToPipes(edges, edgeFieldMappings) {
-  return edges.map(e => {
-    const key = _fmKey(e.source, e.target)
-    const fm = edgeFieldMappings[key]
-    return {
-      uid: e.id, source_block_uid: e.source, source_fitting_uid: e.sourceHandle || 'output',
-      target_block_uid: e.target, target_fitting_uid: e.targetHandle || 'input',
-      ...(fm ? { field_mapping: fm } : {}),
+  fittings.input.forEach((f, i) => {
+    if (f.color) {
+      const portEl = nodeEl.querySelector(`.input.input_${i + 1}`)
+      if (portEl) { portEl.style.background = f.color; portEl.style.borderColor = f.color }
     }
+  })
+  // Add port labels for multi-fitting blocks
+  if (fittings.output.length > 1) {
+    fittings.output.forEach((f, i) => {
+      const portEl = nodeEl.querySelector(`.output.output_${i + 1}`)
+      if (portEl && !portEl.querySelector('.port-label-tag')) {
+        const lbl = document.createElement('span')
+        lbl.className = 'port-label-tag port-label-tag--right'
+        lbl.textContent = f.label
+        if (f.color) lbl.style.color = f.color
+        portEl.appendChild(lbl)
+      }
+    })
+  }
+  if (fittings.input.length > 1) {
+    fittings.input.forEach((f, i) => {
+      const portEl = nodeEl.querySelector(`.input.input_${i + 1}`)
+      if (portEl && !portEl.querySelector('.port-label-tag')) {
+        const lbl = document.createElement('span')
+        lbl.className = 'port-label-tag port-label-tag--left'
+        lbl.textContent = f.label
+        if (f.color) lbl.style.color = f.color
+        portEl.appendChild(lbl)
+      }
+    })
+  }
+}
+
+function applyEdgeColor(editor, srcDfId, tgtDfId, outputClass, inputClass, catalog, nodes, dfIdToUid) {
+  const sourceUid = dfIdToUid[srcDfId]
+  if (!sourceUid) return
+  const srcNode = nodes.find(n => n.id === sourceUid)
+  if (!srcNode) return
+  const fittings = getBlockFittings(catalog, srcNode.data.blockType).output
+  const portIdx = parseInt(outputClass.split('_')[1]) - 1
+  const fitting = fittings[portIdx]
+  const color = fitting?.color || ''
+  if (!color) return
+  setTimeout(() => {
+    const svgs = editor.container.querySelectorAll(
+      `.connection.node_out_node-${srcDfId}.node_in_node-${tgtDfId}.${outputClass}.${inputClass}`
+    )
+    svgs.forEach(svg => {
+      const path = svg.querySelector('.main-path')
+      if (path) path.style.stroke = color
+    })
+  }, 50)
+}
+
+function flashEdge(editor, uidToDfId, sourceUid, targetUid, flashType) {
+  const srcDfId = uidToDfId[sourceUid]
+  const tgtDfId = uidToDfId[targetUid]
+  if (srcDfId == null || tgtDfId == null) return
+  const svgs = editor.container.querySelectorAll(
+    `.connection.node_out_node-${srcDfId}.node_in_node-${tgtDfId}`
+  )
+  svgs.forEach(svg => {
+    svg.classList.remove('edge-flash--running', 'edge-flash--completed', 'edge-flash--failed')
+    if (flashType) svg.classList.add(`edge-flash--${flashType}`)
   })
 }
 
@@ -256,6 +362,18 @@ const PipelineListPage = defineComponent({
   setup() {
     const pipelines = ref([])
     const loading = ref(true)
+    const catalogOpen = ref(false)
+    const catalog = ref([])
+    const catalogLoading = ref(false)
+    const busy = reactive({}) // key -> true while adding/removing
+    const expandedPipeline = ref(null) // pipeline id showing run history
+    const pipelineRuns = ref([]) // runs for expanded pipeline
+    const runsLoading = ref(false)
+    const expandedRun = ref(null) // run id showing block detail
+    const expandedRunDetail = ref(null) // full run detail
+    const expandedBlock = ref(null) // block within expanded run
+    let refreshTimer = null
+
     async function load() {
       loading.value = true
       try { pipelines.value = await api('GET', '/pipelines') } catch {}
@@ -268,35 +386,308 @@ const PipelineListPage = defineComponent({
         pipelines.value = pipelines.value.filter(p => (p.id || p._id) !== id)
       } catch {}
     }
-    onMounted(load)
+    async function loadCatalog() {
+      catalogLoading.value = true
+      try { catalog.value = await api('GET', '/demo-pipelines/catalog') } catch {}
+      catalogLoading.value = false
+    }
+    async function toggleCatalog() {
+      catalogOpen.value = !catalogOpen.value
+      if (catalogOpen.value && catalog.value.length === 0) await loadCatalog()
+    }
+    async function addSample(key) {
+      busy[key] = true
+      try {
+        await api('POST', `/demo-pipelines/add/${key}`)
+        await Promise.all([load(), loadCatalog()])
+      } catch {}
+      busy[key] = false
+    }
+    async function removeSample(key) {
+      busy[key] = true
+      try {
+        await api('DELETE', `/demo-pipelines/remove/${key}`)
+        await Promise.all([load(), loadCatalog()])
+      } catch {}
+      busy[key] = false
+    }
+    function isSample(p) {
+      return (p.tags || []).some(t => t.startsWith('_sample:'))
+    }
+    async function toggleSchedule(p, e) {
+      e.stopPropagation()
+      const pid = p.id || p._id
+      if (p.schedule) {
+        // Disable: find and disable the schedule
+        try {
+          const schedules = await api('GET', '/schedules')
+          const sched = schedules.find(s => s.pipeline_id === pid && s.enabled)
+          if (sched) await api('PUT', `/schedules/${sched.id}`, { ...sched, enabled: false })
+        } catch {}
+      } else {
+        // Enable: trigger a save which re-creates the schedule (needs timer_trigger block)
+        try {
+          const full = await api('GET', `/pipelines/${pid}`)
+          await api('PUT', `/pipelines/${pid}`, full)
+        } catch {}
+      }
+      await load()
+    }
+    function timeAgo(dateStr) {
+      if (!dateStr || dateStr === 'None' || dateStr === '') return ''
+      const d = new Date(dateStr)
+      if (isNaN(d)) return ''
+      const s = Math.floor((Date.now() - d.getTime()) / 1000)
+      if (s < 5) return 'just now'
+      if (s < 60) return `${s}s ago`
+      if (s < 3600) return `${Math.floor(s / 60)}m ago`
+      if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+      return `${Math.floor(s / 86400)}d ago`
+    }
+    async function toggleRunHistory(pid, e) {
+      e.stopPropagation()
+      if (expandedPipeline.value === pid) {
+        expandedPipeline.value = null; pipelineRuns.value = []; expandedRun.value = null; expandedRunDetail.value = null
+        return
+      }
+      expandedPipeline.value = pid; expandedRun.value = null; expandedRunDetail.value = null; expandedBlock.value = null
+      runsLoading.value = true
+      try { pipelineRuns.value = await api('GET', `/runs?pipeline_id=${pid}&limit=100`) } catch { pipelineRuns.value = [] }
+      runsLoading.value = false
+    }
+    async function toggleRunDetail(runId, e) {
+      e.stopPropagation()
+      if (expandedRun.value === runId) {
+        expandedRun.value = null; expandedRunDetail.value = null; expandedBlock.value = null; return
+      }
+      expandedRun.value = runId; expandedBlock.value = null
+      try { expandedRunDetail.value = await api('GET', `/runs/${runId}`) } catch { expandedRunDetail.value = null }
+    }
+    function fmtRunTime(iso) {
+      if (!iso) return ''
+      return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    }
+    function fmtRunDur(r) {
+      if (!r.started_at || !r.finished_at) return ''
+      const ms = new Date(r.finished_at) - new Date(r.started_at)
+      return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
+    }
+    function fmtDur(ms) {
+      if (!ms) return ''
+      return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
+    }
+    function onKeydown(e) {
+      if (e.key === 'Escape' && catalogOpen.value) {
+        catalogOpen.value = false
+      }
+      if (e.key === 'Escape' && expandedPipeline.value) {
+        expandedPipeline.value = null; pipelineRuns.value = []; expandedRun.value = null; expandedRunDetail.value = null
+      }
+    }
+    onMounted(() => {
+      load()
+      window.addEventListener('keydown', onKeydown)
+      // Refresh every 5s to pick up running status and schedule changes
+      refreshTimer = setInterval(() => { if (!loading.value) load() }, 5000)
+    })
+    Vue.onUnmounted(() => {
+      window.removeEventListener('keydown', onKeydown)
+      if (refreshTimer) clearInterval(refreshTimer)
+    })
+
+    // Group catalog by category
+    function catalogByCategory() {
+      const groups = {}
+      for (const s of catalog.value) {
+        if (!groups[s.category]) groups[s.category] = []
+        groups[s.category].push(s)
+      }
+      return groups
+    }
 
     return () => h('div', { class: 'pipeline-list' }, [
       h('div', { class: 'pipeline-list__header' }, [
         h('h2', null, 'Pipelines'),
         h('div', { style: 'flex:1' }),
+        h('button', {
+          class: 'toolbar-btn' + (catalogOpen.value ? ' toolbar-btn--active' : ''),
+          onClick: toggleCatalog,
+        }, [
+          h('span', { class: 'material-icons', style: 'font-size:16px' }, 'apps'),
+          ' Samples',
+        ]),
         h('button', { class: 'toolbar-btn toolbar-btn--primary', onClick: () => router.push('/editor') }, [
           h('span', { class: 'material-icons', style: 'font-size:16px' }, 'add'), ' New Pipeline',
         ]),
       ]),
+
+      // Sample catalog drawer
+      catalogOpen.value && h('div', { class: 'catalog-drawer' }, [
+        catalogLoading.value
+          ? h('div', { style: 'padding:16px; color:var(--p-text-secondary); font-size:13px' }, 'Loading catalog...')
+          : Object.entries(catalogByCategory()).map(([cat, items]) =>
+              h('div', { key: cat, class: 'catalog-group' }, [
+                h('div', { class: 'catalog-group__title' }, cat),
+                ...items.map(s => h('div', { key: s.key, class: 'catalog-item' + (s.installed ? ' catalog-item--installed' : '') }, [
+                  h('div', { class: 'catalog-item__info' }, [
+                    h('span', { class: 'material-icons catalog-item__icon' }, s.icon),
+                    h('div', { style: 'flex:1; min-width:0' }, [
+                      h('div', { class: 'catalog-item__title' }, [
+                        s.title,
+                        s.has_schedule ? h('span', { class: 'trigger-badge', style: 'margin-left:6px' }, 'scheduled') : null,
+                      ]),
+                      h('div', { class: 'catalog-item__desc' }, s.description),
+                    ]),
+                    s.installed
+                      ? h('button', {
+                          class: 'toolbar-btn toolbar-btn--ghost', style: 'padding:3px 8px; font-size:11px',
+                          onClick: () => removeSample(s.key), disabled: busy[s.key],
+                        }, busy[s.key] ? '...' : 'Remove')
+                      : h('button', {
+                          class: 'toolbar-btn toolbar-btn--primary', style: 'padding:3px 8px; font-size:11px',
+                          onClick: () => addSample(s.key), disabled: busy[s.key],
+                        }, busy[s.key] ? '...' : 'Add'),
+                  ]),
+                ])),
+              ]),
+            ),
+      ]),
+
       loading.value ? h('div', { class: 'empty-state' }, 'Loading...')
         : pipelines.value.length === 0
           ? h('div', { class: 'empty-state' }, [
               h('span', { class: 'material-icons' }, 'account_tree'),
               h('div', { style: 'font-size:16px; margin-top:8px' }, 'No pipelines yet'),
-              h('div', { style: 'margin-top:4px' }, 'Create your first pipeline to get started'),
+              h('div', { style: 'margin-top:4px' }, 'Create a pipeline or add samples from the catalog'),
             ])
-          : h('div', { class: 'pipeline-grid' }, pipelines.value.map(p =>
-              h('div', { class: 'pipeline-card', onClick: () => router.push(`/editor/${p.id || p._id}`) }, [
-                h('div', { style: 'display:flex; align-items:center; gap:8px' }, [
-                  h('div', { class: 'pipeline-card__name', style: 'flex:1' }, p.name),
-                  h('button', {
-                    class: 'icon-btn', title: 'Delete', style: 'width:24px; height:24px',
-                    onClick: (e) => deletePipeline(p.id || p._id, e),
-                  }, [h('span', { class: 'material-icons', style: 'font-size:14px; color:var(--p-node-failed)' }, 'delete')]),
+          : h('div', null, [
+              h('div', { class: 'pipeline-grid' }, pipelines.value.map(p => {
+                const pid = p.id || p._id
+                const sample = isSample(p)
+                const lr = p.latest_run
+                const isRunning = lr && (lr.status === 'running' || lr.status === 'queued')
+                const hasTimer = !!(p.schedule && p.schedule.enabled)
+                const statusClass = isRunning ? ' pipeline-card--running' : lr?.status === 'failed' ? ' pipeline-card--failed' : ''
+                const isExpanded = expandedPipeline.value === pid
+                return h('div', {
+                  class: 'pipeline-card' + (sample ? ' pipeline-card--sample' : '') + statusClass + (isExpanded ? ' pipeline-card--expanded' : ''),
+                  onClick: () => router.push(`/editor/${pid}`),
+                }, [
+                  // Row 1: name + actions
+                  h('div', { style: 'display:flex; align-items:center; gap:6px' }, [
+                    h('div', { class: 'pipeline-card__name', style: 'flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap' }, p.name),
+                    // Run history toggle
+                    h('button', {
+                      class: 'icon-btn', title: 'Run history', style: 'width:24px; height:24px',
+                      onClick: (e) => toggleRunHistory(pid, e),
+                    }, [h('span', { class: 'material-icons', style: 'font-size:14px; color:' + (isExpanded ? 'var(--p-primary)' : 'var(--p-text-secondary)') }, 'history')]),
+                    // Schedule toggle
+                    h('button', {
+                      class: 'icon-btn', title: hasTimer ? 'Disable schedule' : 'No schedule',
+                      style: 'width:24px; height:24px' + (hasTimer ? '' : '; opacity:0.3'),
+                      onClick: (e) => hasTimer ? toggleSchedule(p, e) : e.stopPropagation(),
+                    }, [h('span', { class: 'material-icons', style: 'font-size:14px; color:' + (hasTimer ? 'var(--p-primary)' : 'var(--p-text-secondary)') }, 'timer')]),
+                    h('button', {
+                      class: 'icon-btn', title: 'Delete', style: 'width:24px; height:24px',
+                      onClick: (e) => deletePipeline(pid, e),
+                    }, [h('span', { class: 'material-icons', style: 'font-size:14px; color:var(--p-node-failed)' }, 'delete')]),
+                  ]),
+                  // Row 2: meta
+                  h('div', { class: 'pipeline-card__meta' }, [
+                    `${(p.blocks || []).length} blocks · v${p.version || 1}`,
+                    sample ? h('span', { class: 'sample-badge' }, 'sample') : null,
+                  ]),
+                  // Row 3: status line
+                  (lr || hasTimer) ? h('div', { class: 'pipeline-card__status' }, [
+                    lr ? h('span', {
+                      class: 'pipeline-card__run-status pipeline-card__run-status--' + (lr.status || 'idle'),
+                    }, [
+                      h('span', { class: 'material-icons', style: 'font-size:12px; margin-right:3px' },
+                        isRunning ? 'play_circle' : lr.status === 'completed' ? 'check_circle' : lr.status === 'failed' ? 'error' : 'circle'),
+                      isRunning ? 'Running' : lr.status === 'completed' ? timeAgo(lr.finished_at) : lr.status === 'failed' ? 'Failed ' + timeAgo(lr.finished_at) : lr.status,
+                    ]) : null,
+                    hasTimer ? h('span', { class: 'pipeline-card__schedule-badge' }, [
+                      h('span', { class: 'material-icons', style: 'font-size:11px; margin-right:2px' }, 'timer'),
+                      p.schedule.interval_seconds ? `${p.schedule.interval_seconds}s` : p.schedule.cron_expression || 'scheduled',
+                    ]) : null,
+                  ]) : null,
+                ])
+              })),
+
+              // Expanded run history panel (below the grid)
+              expandedPipeline.value ? h('div', { class: 'run-history-panel' }, [
+                h('div', { class: 'run-history-panel__header' }, [
+                  h('h3', { style: 'margin:0; font-size:14px; color:var(--p-text)' }, [
+                    'Run History — ',
+                    pipelines.value.find(p => (p.id || p._id) === expandedPipeline.value)?.name || 'Pipeline',
+                  ]),
+                  h('button', { class: 'icon-btn', onClick: (e) => { e.stopPropagation(); expandedPipeline.value = null } }, [
+                    h('span', { class: 'material-icons', style: 'font-size:16px' }, 'close'),
+                  ]),
                 ]),
-                h('div', { class: 'pipeline-card__meta' }, `${(p.blocks || []).length} blocks · v${p.version || 1}`),
-              ]),
-            )),
+                runsLoading.value
+                  ? h('div', { style: 'padding:12px; color:var(--p-text-secondary); font-size:12px' }, 'Loading...')
+                  : pipelineRuns.value.length === 0
+                    ? h('div', { style: 'padding:12px; color:var(--p-text-secondary); font-size:12px' }, 'No runs yet')
+                    : h('div', { class: 'run-history-list' }, pipelineRuns.value.map(r => {
+                        const isOpen = expandedRun.value === r.id
+                        const rd = expandedRunDetail.value
+                        const statusColors = { completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', running: 'var(--p-node-running)' }
+
+                        return h('div', { key: r.id, class: 'run-history-item' + (isOpen ? ' run-history-item--open' : '') }, [
+                          // Run row
+                          h('div', { class: 'run-history-item__row', onClick: (e) => toggleRunDetail(r.id, e) }, [
+                            h('span', { class: 'material-icons', style: 'font-size:14px; color:' + (statusColors[r.status] || 'var(--p-text-secondary)') },
+                              r.status === 'completed' ? 'check_circle' : r.status === 'failed' ? 'error' : r.status === 'running' ? 'play_circle' : 'circle'),
+                            h('span', { class: `status-badge status-badge--${r.status}`, style: 'font-size:10px; padding:1px 5px' }, r.status),
+                            h('span', { style: 'font-size:11px; color:var(--p-text-secondary)' }, fmtRunTime(r.created_at)),
+                            fmtRunDur(r) ? h('span', { style: 'font-size:11px; color:var(--p-text-secondary)' }, fmtRunDur(r)) : null,
+                            // Inline log summary
+                            (r.log && r.log.length) ? h('span', { style: 'font-size:10px; color:var(--p-text-secondary); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap' },
+                              r.log.map(e => `${e.label || e.block_type}${e.error ? ' ✗' : ' ✓'}`).join(' → ')
+                            ) : h('span', { style: 'flex:1' }),
+                            r.error ? h('span', { style: 'font-size:10px; color:var(--p-node-failed); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap' }, r.error) : null,
+                            h('span', { class: 'material-icons', style: 'font-size:14px; color:var(--p-text-secondary)' }, isOpen ? 'expand_less' : 'expand_more'),
+                          ]),
+
+                          // Expanded run detail
+                          isOpen && rd ? h('div', { class: 'run-history-item__detail' }, [
+                            // Error banner
+                            rd.error ? h('div', { class: 'run-detail__error', style: 'margin:0 0 8px' }, [
+                              h('span', { class: 'material-icons', style: 'font-size:14px' }, 'error'), rd.error,
+                            ]) : null,
+                            // Block timeline
+                            h('div', { class: 'run-detail__blocks' },
+                              ((rd.log && rd.log.length) ? rd.log : Object.keys(rd.block_states || {}).map(bid => ({ uid: bid, ...rd.block_states[bid] }))).map(entry => {
+                                const bid = entry.uid
+                                const isBlockOpen = expandedBlock.value === `${r.id}:${bid}`
+                                const st = entry.status || 'pending'
+                                const statusIcon = st === 'completed' ? 'check_circle' : st === 'failed' ? 'error' : 'pending'
+                                return h('div', { class: 'run-block', key: bid }, [
+                                  h('div', {
+                                    class: 'run-block__header',
+                                    onClick: (e) => { e.stopPropagation(); expandedBlock.value = isBlockOpen ? null : `${r.id}:${bid}` },
+                                    style: 'cursor:pointer',
+                                  }, [
+                                    h('span', { class: 'material-icons', style: `font-size:14px; color:${statusColors[st] || 'var(--p-text-secondary)'}` }, statusIcon),
+                                    entry.block_type ? h('code', { style: 'color:var(--p-text-secondary); font-size:9px; margin-right:4px' }, entry.block_type) : null,
+                                    h('span', { style: 'font-size:12px' }, entry.label || bid),
+                                    h('span', { style: 'flex:1' }),
+                                    entry.parcel_count > 1 ? h('span', { style: 'font-size:9px; color:var(--p-text-secondary); margin-right:6px' }, `${entry.parcel_count} parcels`) : null,
+                                    entry.duration_ms != null ? h('span', { class: 'run-block__dur', style: 'font-size:10px' }, fmtDur(entry.duration_ms)) : null,
+                                  ]),
+                                  isBlockOpen ? h('div', { class: 'run-block__detail' }, [
+                                    entry.error ? h('div', { class: 'run-block__error' }, entry.error) : null,
+                                    (entry.output_summary && Object.keys(entry.output_summary).length) ? h('pre', { class: 'run-block__json', style: 'font-size:10px; max-height:200px' }, JSON.stringify(entry.output_summary, null, 2)) : null,
+                                  ]) : null,
+                                ])
+                              }),
+                            ),
+                          ]) : (isOpen ? h('div', { style: 'padding:8px 12px; font-size:11px; color:var(--p-text-secondary)' }, 'Loading...') : null),
+                        ])
+                      })),
+              ]) : null,
+            ]),
     ])
   },
 })
@@ -314,11 +705,17 @@ const PipelineEditorPage = defineComponent({
     const statusMsg = ref('')
     const showInfra = ref(false)
 
-    // Vue Flow state
+    // Canvas state
     const nodes = ref([])
     const edges = ref([])
-    // Field mappings stored outside Vue Flow (it strips edge.data)
     const edgeFieldMappings = reactive({})
+
+    // Drawflow state
+    let editor = null
+    const dfIdToUid = {}  // Drawflow int ID → our block UID string
+    const uidToDfId = {}  // our block UID string → Drawflow int ID
+    let _programmaticChange = false  // suppress Drawflow events during programmatic changes
+    let _unselectTimer = null
 
     // --- Undo/Redo history ---
     const MAX_HISTORY = 100
@@ -340,11 +737,20 @@ const PipelineEditorPage = defineComponent({
     function restoreSnapshot(s) {
       _skipSnapshot = true
       const data = JSON.parse(s)
-      nodes.value = data.nodes
-      edges.value = data.edges
       // Restore field mappings
       Object.keys(edgeFieldMappings).forEach(k => delete edgeFieldMappings[k])
       if (data.edgeFieldMappings) Object.assign(edgeFieldMappings, data.edgeFieldMappings)
+      // Rebuild Drawflow canvas from snapshot blocks/edges
+      const blocks = data.nodes.map(n => ({
+        uid: n.id, block_type: n.data.blockType, label: n.data.label,
+        config: n.data.config || {}, position: n.position || { x: 0, y: 0 },
+      }))
+      const pipes = data.edges.map(e => ({
+        uid: e.id, source_block_uid: e.source, target_block_uid: e.target,
+        source_fitting_uid: e.sourceHandle || 'output', target_fitting_uid: e.targetHandle || 'input',
+      }))
+      if (editor) loadBlocksIntoDrawflow(blocks, pipes)
+      else { nodes.value = data.nodes; edges.value = data.edges }
       nextTick(() => { _skipSnapshot = false })
     }
     function undo() {
@@ -373,6 +779,11 @@ const PipelineEditorPage = defineComponent({
       if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo() }
       if (mod && e.key === 'z' && e.shiftKey) { e.preventDefault(); redo() }
       if (mod && e.key === 'y') { e.preventDefault(); redo() }
+      // Delete selected edge or node
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !e.target.closest('input, textarea, [contenteditable]')) {
+        if (selectedEdgeId.value) { e.preventDefault(); deleteEdge(selectedEdgeId.value) }
+        else if (selectedNodeId.value) { e.preventDefault(); deleteNode(selectedNodeId.value) }
+      }
     }
     onMounted(() => document.addEventListener('keydown', _handleKeyboard))
 
@@ -380,11 +791,18 @@ const PipelineEditorPage = defineComponent({
     const running = ref(false)
     const runLog = ref([])
     const runOutput = ref(null)
+    // (edge flash is handled via Drawflow DOM classes, no reactive needed)
     const consoleTab = ref('log')
+    const hasSchedule = ref(false) // true if backend schedule is active
+    let pipelineEvtSource = null // EventSource for pipeline-level events
     const consoleHeight = ref(parseInt(localStorage.getItem('plumber-console-h')) || 180)
 
     // LLM defaults (fetched from API)
     const llmDefaults = ref({ tiers: {}, providers: [], models: {} })
+    // Global template variables
+    const globalVars = ref([])
+    // Variable autocomplete state
+    const varAutocomplete = reactive({ visible: false, items: [], x: 0, y: 0, inputEl: null, selected: 0, prefix: '' })
 
     // Modal editor for multiline fields
     const textModal = ref(null) // { nodeId, key, title, value }
@@ -411,17 +829,51 @@ const PipelineEditorPage = defineComponent({
       setTimeout(() => { if (statusMsg.value === msg) statusMsg.value = '' }, dur)
     }
 
+    function nodesToBlocks(nodeList) {
+      return nodeList.map(n => ({
+        uid: n.id, block_type: n.data.blockType, label: n.data.label,
+        config: n.data.config || {}, position: n.position || { x: 0, y: 0 },
+      }))
+    }
+    function edgesToPipes(edgeList, fmMap) {
+      return edgeList.map(e => {
+        const fm = fmMap[_fmKey(e.source, e.target)]
+        return {
+          uid: e.id, source_block_uid: e.source, source_fitting_uid: e.sourceHandle || 'output',
+          target_block_uid: e.target, target_fitting_uid: e.targetHandle || 'input',
+          ...(fm ? { field_mapping: fm } : {}),
+        }
+      })
+    }
+
     function addBlock(blockType, label, config, x, y) {
-      const id = uid()
+      const blockUid = uid()
+      const fittings = getBlockFittings(catalog.value, blockType)
+      const effectiveLabel = label || blockType.replace(/_/g, ' ')
+      const html = nodeHtml(blockType, effectiveLabel, 'idle')
+
+      const dfId = editor.addNode(blockType, fittings.input.length, fittings.output.length, x, y, blockType, {}, html)
+      dfIdToUid[dfId] = blockUid
+      uidToDfId[blockUid] = dfId
+
       nodes.value = [...nodes.value, {
-        id, type: 'block', position: { x, y },
-        data: { label: label || blockType.replace(/_/g, ' '), blockType, config: config || {}, status: 'idle' },
-        sourcePosition: Position.Right, targetPosition: Position.Left,
+        id: blockUid, position: { x, y },
+        data: { label: effectiveLabel, blockType, config: config || {}, status: 'idle' },
       }]
-      return id
+
+      nextTick(() => applyPortColors(editor, dfId, fittings))
+      return blockUid
     }
 
     function deleteNode(nodeId) {
+      const dfId = uidToDfId[nodeId]
+      if (dfId != null) {
+        _programmaticChange = true
+        editor.removeNodeId(`node-${dfId}`)
+        _programmaticChange = false
+        delete dfIdToUid[dfId]
+        delete uidToDfId[nodeId]
+      }
       nodes.value = nodes.value.filter(n => n.id !== nodeId)
       edges.value = edges.value.filter(e => e.source !== nodeId && e.target !== nodeId)
       if (selectedNodeId.value === nodeId) selectedNodeId.value = null
@@ -463,24 +915,35 @@ const PipelineEditorPage = defineComponent({
       return Object.keys(mapping).length > 0 ? mapping : null
     }
 
-    function onConnect(params) {
-      const id = uid()
-      const fm = inferFieldMapping(params.source, params.target)
-      if (fm) edgeFieldMappings[_fmKey(params.source, params.target)] = fm
-      edges.value = [...edges.value, {
-        id, source: params.source, target: params.target,
-        sourceHandle: params.sourceHandle || 'output', targetHandle: params.targetHandle || 'input',
-        type: 'smoothstep', animated: false,
-        style: { stroke: 'var(--p-edge-default)', strokeWidth: 2 },
-        markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--p-edge-default)' },
-      }]
+    // onConnect handled by Drawflow connectionCreated event (see onMounted)
+
+    const selectedEdgeId = ref(null)
+
+    function deleteEdge(edgeId) {
+      const edge = edges.value.find(e => e.id === edgeId)
+      if (edge) {
+        const srcDfId = uidToDfId[edge.source]
+        const tgtDfId = uidToDfId[edge.target]
+        if (srcDfId != null && tgtDfId != null) {
+          const srcNode = nodes.value.find(n => n.id === edge.source)
+          const tgtNode = nodes.value.find(n => n.id === edge.target)
+          const srcFittings = getBlockFittings(catalog.value, srcNode?.data.blockType).output
+          const tgtFittings = getBlockFittings(catalog.value, tgtNode?.data.blockType).input
+          const outputClass = fittingUidToPort(srcFittings, edge.sourceHandle, 'output')
+          const inputClass = fittingUidToPort(tgtFittings, edge.targetHandle, 'input')
+          _programmaticChange = true
+          editor.removeSingleConnection(srcDfId, tgtDfId, outputClass, inputClass)
+          _programmaticChange = false
+        }
+        const key = _fmKey(edge.source, edge.target)
+        delete edgeFieldMappings[key]
+      }
+      edges.value = edges.value.filter(e => e.id !== edgeId)
+      selectedEdgeId.value = null
+      pushUndo()
     }
 
-    function onNodeClick(event) { selectedNodeId.value = event.node.id }
-    function onPaneClick() { selectedNodeId.value = null }
-
-    function onNodeDoubleClick(event) {
-      const node = event.node
+    function onNodeDoubleClick(node) {
       const primaryKey = PRIMARY_FIELD[node.data.blockType]
       if (!primaryKey) return
       const catalogEntry = catalog.value.find(c => c.block_type === node.data.blockType)
@@ -499,8 +962,11 @@ const PipelineEditorPage = defineComponent({
       const data = event.dataTransfer.getData('application/plumber-block')
       if (!data) return
       const entry = JSON.parse(data)
-      const bounds = event.currentTarget.getBoundingClientRect()
-      addBlock(entry.block_type, entry.block_type.replace(/_/g, ' '), {}, event.clientX - bounds.left, event.clientY - bounds.top)
+      // Convert screen coordinates to Drawflow canvas coordinates
+      const containerRect = editor.container.getBoundingClientRect()
+      const x = (event.clientX - containerRect.left - editor.canvas_x) / editor.zoom
+      const y = (event.clientY - containerRect.top - editor.canvas_y) / editor.zoom
+      addBlock(entry.block_type, entry.block_type.replace(/_/g, ' '), {}, x, y)
     }
     function onDragOver(event) { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }
 
@@ -508,8 +974,7 @@ const PipelineEditorPage = defineComponent({
       pipelineName.value = preset.name
       pipelineId.value = null
       Object.keys(edgeFieldMappings).forEach(k => delete edgeFieldMappings[k])
-      nodes.value = blocksToNodes(preset.blocks)
-      edges.value = pipesToEdges(preset.pipes, edgeFieldMappings)
+      loadBlocksIntoDrawflow(preset.blocks, preset.pipes)
       presetMenuOpen.value = false
       selectedNodeId.value = null
       undoStack.length = 0; redoStack.length = 0
@@ -517,11 +982,90 @@ const PipelineEditorPage = defineComponent({
       showStatus(`Loaded preset: ${preset.name}`)
     }
 
+    // Load blocks and pipes into Drawflow + our refs
+    function loadBlocksIntoDrawflow(blocks, pipes) {
+      _programmaticChange = true
+      editor.clear()
+      Object.keys(dfIdToUid).forEach(k => delete dfIdToUid[k])
+      Object.keys(uidToDfId).forEach(k => delete uidToDfId[k])
+
+      for (const b of blocks) {
+        const fittings = getBlockFittings(catalog.value, b.block_type)
+        const html = nodeHtml(b.block_type, b.label, 'idle')
+        const dfId = editor.addNode(
+          b.block_type, fittings.input.length, fittings.output.length,
+          b.position?.x || 0, b.position?.y || 0, b.block_type, {}, html
+        )
+        dfIdToUid[dfId] = b.uid
+        uidToDfId[b.uid] = dfId
+      }
+
+      for (const pipe of pipes) {
+        const srcDfId = uidToDfId[pipe.source_block_uid]
+        const tgtDfId = uidToDfId[pipe.target_block_uid]
+        if (srcDfId == null || tgtDfId == null) continue
+        const srcBlock = blocks.find(b => b.uid === pipe.source_block_uid)
+        const tgtBlock = blocks.find(b => b.uid === pipe.target_block_uid)
+        const srcFittings = getBlockFittings(catalog.value, srcBlock?.block_type).output
+        const tgtFittings = getBlockFittings(catalog.value, tgtBlock?.block_type).input
+        const outputClass = fittingUidToPort(srcFittings, pipe.source_fitting_uid, 'output')
+        const inputClass = fittingUidToPort(tgtFittings, pipe.target_fitting_uid, 'input')
+        editor.addConnection(srcDfId, tgtDfId, outputClass, inputClass)
+      }
+      _programmaticChange = false
+
+      nodes.value = blocks.map(b => ({
+        id: b.uid, position: { x: b.position?.x || 0, y: b.position?.y || 0 },
+        data: { label: b.label, blockType: b.block_type, config: b.config || {}, status: 'idle' },
+      }))
+
+      Object.keys(edgeFieldMappings).forEach(k => delete edgeFieldMappings[k])
+      edges.value = pipes.map(p => {
+        if (p.field_mapping) edgeFieldMappings[_fmKey(p.source_block_uid, p.target_block_uid)] = p.field_mapping
+        return {
+          id: p.uid, source: p.source_block_uid, target: p.target_block_uid,
+          sourceHandle: p.source_fitting_uid, targetHandle: p.target_fitting_uid,
+        }
+      })
+
+      // Apply port colors and edge colors after DOM renders
+      nextTick(() => {
+        for (const b of blocks) {
+          const dfId = uidToDfId[b.uid]
+          if (dfId != null) applyPortColors(editor, dfId, getBlockFittings(catalog.value, b.block_type))
+        }
+        for (const pipe of pipes) {
+          const srcDfId = uidToDfId[pipe.source_block_uid]
+          const tgtDfId = uidToDfId[pipe.target_block_uid]
+          if (srcDfId != null && tgtDfId != null) {
+            const srcBlock = blocks.find(b => b.uid === pipe.source_block_uid)
+            const srcFittings = getBlockFittings(catalog.value, srcBlock?.block_type).output
+            const outputClass = fittingUidToPort(srcFittings, pipe.source_fitting_uid, 'output')
+            const tgtBlock = blocks.find(b => b.uid === pipe.target_block_uid)
+            const tgtFittings = getBlockFittings(catalog.value, tgtBlock?.block_type).input
+            const inputClass = fittingUidToPort(tgtFittings, pipe.target_fitting_uid, 'input')
+            applyEdgeColor(editor, srcDfId, tgtDfId, outputClass, inputClass, catalog.value, nodes.value, dfIdToUid)
+          }
+        }
+      })
+    }
+
     async function savePipeline() {
       saving.value = true
+      // Read current positions from Drawflow
+      const exported = editor.export()
+      const dfData = exported.drawflow.Home.data
+      for (const [dfIdStr, dfNode] of Object.entries(dfData)) {
+        const blockUid = dfIdToUid[parseInt(dfIdStr)]
+        const node = nodes.value.find(n => n.id === blockUid)
+        if (node) node.position = { x: Math.round(dfNode.pos_x), y: Math.round(dfNode.pos_y) }
+      }
+
       const payload = {
-        name: pipelineName.value, blocks: nodesToBlocks(nodes.value),
-        pipes: edgesToPipes(edges.value, edgeFieldMappings), owner_id: IMAGINARY_OWNER, owner_type: 'user', tags: [],
+        name: pipelineName.value,
+        blocks: nodesToBlocks(nodes.value),
+        pipes: edgesToPipes(edges.value, edgeFieldMappings),
+        owner_id: IMAGINARY_OWNER, owner_type: 'user', tags: [],
       }
       try {
         if (pipelineId.value) {
@@ -534,6 +1078,9 @@ const PipelineEditorPage = defineComponent({
           window.history.replaceState(null, '', `/editor/${pipelineId.value}`)
           showStatus('Created pipeline')
         }
+        const timer = nodes.value.find(n => n.data.blockType === 'timer_trigger')
+        const cfg = timer?.data?.config || {}
+        hasSchedule.value = !!(parseInt(cfg.interval_seconds) > 0 || (cfg.cron_expression || '').trim())
       } catch (err) { showStatus(`Error: ${err.message}`) }
       saving.value = false
     }
@@ -543,55 +1090,129 @@ const PipelineEditorPage = defineComponent({
         const p = await api('GET', `/pipelines/${id}`)
         pipelineName.value = p.name
         pipelineId.value = p.id || p._id
-        nodes.value = blocksToNodes(p.blocks || [])
-        edges.value = pipesToEdges(p.pipes || [], edgeFieldMappings)
+        loadBlocksIntoDrawflow(p.blocks || [], p.pipes || [])
         undoStack.length = 0; redoStack.length = 0
         nextTick(pushUndo)
+        const timer = (p.blocks || []).find(b => b.block_type === 'timer_trigger')
+        const cfg = timer?.config || {}
+        hasSchedule.value = !!(parseInt(cfg.interval_seconds) > 0 || (cfg.cron_expression || '').trim())
+        subscribePipelineEvents(pipelineId.value)
       } catch (err) { showStatus(`Failed to load: ${err.message}`) }
+    }
+
+    function subscribePipelineEvents(pid) {
+      if (pipelineEvtSource) { pipelineEvtSource.close(); pipelineEvtSource = null }
+      pipelineEvtSource = new EventSource(`/api/pipelines/${pid}/events`)
+      for (const evtType of ['start', 'block_start', 'block_done', 'error', 'done']) {
+        pipelineEvtSource.addEventListener(evtType, (e) => {
+          try {
+            const data = JSON.parse(e.data)
+            // For 'start' events from scheduler, reset UI if not already running
+            if (evtType === 'start' && !running.value) {
+              running.value = true; runLog.value = []; runOutput.value = null
+              consoleTab.value = 'log'
+              resetAllNodeStatuses()
+            }
+            handleRunEvent(evtType, data)
+            if (evtType === 'done') running.value = false
+          } catch {}
+        })
+      }
+      pipelineEvtSource.onerror = () => {
+        // Reconnect after a brief delay
+        pipelineEvtSource.close()
+        pipelineEvtSource = null
+        setTimeout(() => { if (pipelineId.value === pid) subscribePipelineEvents(pid) }, 3000)
+      }
     }
 
     function setNodeStatus(nodeId, status) {
       const node = nodes.value.find(n => n.id === nodeId)
       if (node) node.data = { ...node.data, status }
+      // Update Drawflow DOM
+      const dfId = uidToDfId[nodeId]
+      if (dfId != null) {
+        const el = document.getElementById(`node-${dfId}`)
+        if (el) {
+          const sc = { running: 'var(--p-node-running)', completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', idle: 'var(--p-node-idle)' }
+          const statusEl = el.querySelector('.block-node__status')
+          if (statusEl) statusEl.style.background = sc[status] || sc.idle
+          const blockEl = el.querySelector('.block-node')
+          if (blockEl) blockEl.className = `block-node block-node--${status}`
+        }
+      }
     }
     function resetAllNodeStatuses() {
       nodes.value = nodes.value.map(n => ({ ...n, data: { ...n.data, status: 'idle', errorFields: [] } }))
+      // Reset all Drawflow node DOMs
+      for (const dfIdStr of Object.keys(dfIdToUid)) {
+        const el = document.getElementById(`node-${dfIdStr}`)
+        if (el) {
+          const statusEl = el.querySelector('.block-node__status')
+          if (statusEl) statusEl.style.background = 'var(--p-node-idle)'
+          const blockEl = el.querySelector('.block-node')
+          if (blockEl) blockEl.className = 'block-node block-node--idle'
+        }
+      }
     }
 
     async function runPipeline() {
       if (nodes.value.length === 0) { showStatus('No blocks to run'); return }
+
+      // 1. Save pipeline first (ensure backend has latest version)
+      let pid = pipelineId.value
+      try {
+        const payload = { name: pipelineName.value, blocks: nodesToBlocks(nodes.value), pipes: edgesToPipes(edges.value, edgeFieldMappings) }
+        if (pid) {
+          await api('PUT', `/pipelines/${pid}`, payload)
+        } else {
+          const created = await api('POST', '/pipelines', payload)
+          pid = created.id
+          pipelineId.value = pid
+          router.replace({ name: 'editor', params: { id: pid } })
+        }
+      } catch (err) {
+        showStatus(`Save failed: ${err.message}`); return
+      }
+
+      // 2. Trigger run via backend
       running.value = true; runLog.value = []; runOutput.value = null
       consoleTab.value = 'log'
       resetAllNodeStatuses()
 
-      const payload = { name: pipelineName.value, blocks: nodesToBlocks(nodes.value), pipes: edgesToPipes(edges.value, edgeFieldMappings) }
+      let runId
       try {
-        const resp = await fetch('/api/run-inline', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
-        })
-        const reader = resp.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split('\n')
-          buffer = lines.pop()
-          let eventType = '', eventData = ''
-          for (const line of lines) {
-            if (line.startsWith('event: ')) eventType = line.slice(7)
-            else if (line.startsWith('data: ')) eventData = line.slice(6)
-            else if (line === '' && eventType && eventData) {
-              try { handleRunEvent(eventType, JSON.parse(eventData)) } catch {}
-              eventType = ''; eventData = ''
+        const result = await api('POST', `/pipelines/${pid}/run`)
+        runId = result.run_id
+      } catch (err) {
+        runLog.value.push({ type: 'error', message: `Trigger failed: ${err.message}`, ts: new Date().toISOString() })
+        running.value = false; return
+      }
+
+      // 3. Events arrive via pipeline-level SSE (already subscribed in loadPipeline).
+      //    If no pipeline subscription exists, fall back to run-level SSE.
+      if (!pipelineEvtSource) {
+        try {
+          const evtSource = new EventSource(`/api/runs/${runId}/events`)
+          evtSource.addEventListener('connected', () => {})
+          for (const evtType of ['start', 'block_start', 'block_done', 'error', 'done']) {
+            evtSource.addEventListener(evtType, (e) => {
+              try { handleRunEvent(evtType, JSON.parse(e.data)) } catch {}
+              if (evtType === 'done') { evtSource.close(); running.value = false }
+            })
+          }
+          evtSource.onerror = () => {
+            evtSource.close()
+            if (running.value) {
+              runLog.value.push({ type: 'error', message: 'Event stream disconnected', ts: new Date().toISOString() })
+              running.value = false
             }
           }
+        } catch (err) {
+          runLog.value.push({ type: 'error', message: `SSE failed: ${err.message}`, ts: new Date().toISOString() })
+          running.value = false
         }
-      } catch (err) {
-        runLog.value.push({ type: 'error', message: `Connection failed: ${err.message}`, ts: new Date().toISOString() })
       }
-      running.value = false
     }
 
     function handleRunEvent(type, data) {
@@ -602,13 +1223,22 @@ const PipelineEditorPage = defineComponent({
         case 'block_start':
           setNodeStatus(data.block_uid, 'running')
           runLog.value.push({ type: 'info', message: `Running: ${data.label} (${data.block_type})`, ts, block_uid: data.block_uid })
-          edges.value = edges.value.map(e => ({
-            ...e, animated: e.target === data.block_uid,
-            style: { stroke: e.target === data.block_uid ? 'var(--p-edge-active)' : 'var(--p-edge-default)', strokeWidth: 2 },
-          }))
+          // Highlight incoming edges as "running"
+          for (const e of edges.value) {
+            if (e.target === data.block_uid) flashEdge(editor, uidToDfId, e.source, e.target, 'running')
+          }
           break
         case 'block_done':
           setNodeStatus(data.block_uid, data.status)
+          // Flash edges: transition incoming + outgoing to completed/failed with 2s fade
+          for (const e of edges.value) {
+            if (e.target === data.block_uid || e.source === data.block_uid) {
+              const st = data.status === 'completed' ? 'completed' : 'failed'
+              flashEdge(editor, uidToDfId, e.source, e.target, st)
+              const src = e.source, tgt = e.target
+              setTimeout(() => flashEdge(editor, uidToDfId, src, tgt, null), 2000)
+            }
+          }
           if (data.status === 'completed') {
             const dur = data.duration_ms < 1000 ? `${data.duration_ms}ms` : `${(data.duration_ms / 1000).toFixed(1)}s`
             const pc = data.parcel_count > 1 ? ` (${data.parcel_count} parcels)` : ''
@@ -668,17 +1298,122 @@ const PipelineEditorPage = defineComponent({
           const td = data.total_ms < 1000 ? `${data.total_ms}ms` : `${(data.total_ms / 1000).toFixed(1)}s`
           runLog.value.push({ type: 'success', message: `Pipeline complete: ${data.blocks_run} blocks in ${td}`, ts })
           runOutput.value = data.output; consoleTab.value = 'output'
-          edges.value = edges.value.map(e => ({ ...e, animated: false, style: { stroke: 'var(--p-edge-default)', strokeWidth: 2 } }))
+          // Stop any 'running' flashes
+          if (editor) {
+            editor.container.querySelectorAll('.edge-flash--running').forEach(el => el.classList.remove('edge-flash--running'))
+          }
+          // Scheduled repeats are handled by the backend scheduler
           break
         }
       }
     }
 
+    let drawflowContainer = null
+
+    function initDrawflow() {
+      if (!drawflowContainer || editor) return
+      editor = new DrawflowLib(drawflowContainer)
+      editor.reroute = false
+      editor.curvature = 0.5
+      editor.start()
+
+      // --- Drawflow events ---
+      editor.on('nodeSelected', (id) => {
+        clearTimeout(_unselectTimer)
+        selectedNodeId.value = dfIdToUid[id] || null
+        selectedEdgeId.value = null
+      })
+      editor.on('nodeUnselected', () => {
+        _unselectTimer = setTimeout(() => {
+          selectedNodeId.value = null
+          selectedEdgeId.value = null
+        }, 50)
+      })
+      editor.on('connectionCreated', ({ output_id, input_id, output_class, input_class }) => {
+        if (_programmaticChange) return
+        const sourceUid = dfIdToUid[output_id]
+        const targetUid = dfIdToUid[input_id]
+        if (!sourceUid || !targetUid) return
+        const srcNode = nodes.value.find(n => n.id === sourceUid)
+        const tgtNode = nodes.value.find(n => n.id === targetUid)
+        const srcFittings = getBlockFittings(catalog.value, srcNode?.data.blockType).output
+        const tgtFittings = getBlockFittings(catalog.value, tgtNode?.data.blockType).input
+        const sourceHandle = portToFittingUid(srcFittings, output_class)
+        const targetHandle = portToFittingUid(tgtFittings, input_class)
+        const edgeId = uid()
+        edges.value = [...edges.value, {
+          id: edgeId, source: sourceUid, target: targetUid, sourceHandle, targetHandle,
+        }]
+        const fm = inferFieldMapping(sourceUid, targetUid)
+        if (fm) edgeFieldMappings[_fmKey(sourceUid, targetUid)] = fm
+        applyEdgeColor(editor, output_id, input_id, output_class, input_class, catalog.value, nodes.value, dfIdToUid)
+        pushUndo()
+      })
+      editor.on('connectionRemoved', ({ output_id, input_id }) => {
+        if (_programmaticChange) return
+        const sourceUid = dfIdToUid[output_id]
+        const targetUid = dfIdToUid[input_id]
+        if (!sourceUid || !targetUid) return
+        edges.value = edges.value.filter(e => !(e.source === sourceUid && e.target === targetUid))
+        delete edgeFieldMappings[_fmKey(sourceUid, targetUid)]
+        pushUndo()
+      })
+      editor.on('nodeMoved', (id) => {
+        const blockUid = dfIdToUid[id]
+        if (!blockUid) return
+        const node = nodes.value.find(n => n.id === blockUid)
+        const dfNode = editor.getNodeFromId(id)
+        if (node && dfNode) {
+          node.position = { x: Math.round(dfNode.pos_x), y: Math.round(dfNode.pos_y) }
+        }
+      })
+      editor.on('nodeRemoved', (id) => {
+        if (_programmaticChange) return
+        const blockUid = dfIdToUid[id]
+        if (!blockUid) return
+        delete dfIdToUid[id]
+        delete uidToDfId[blockUid]
+        nodes.value = nodes.value.filter(n => n.id !== blockUid)
+        edges.value = edges.value.filter(e => e.source !== blockUid && e.target !== blockUid)
+        if (selectedNodeId.value === blockUid) selectedNodeId.value = null
+        pushUndo()
+      })
+      editor.on('connectionSelected', ({ output_id, input_id }) => {
+        const sourceUid = dfIdToUid[output_id]
+        const targetUid = dfIdToUid[input_id]
+        const edge = edges.value.find(e => e.source === sourceUid && e.target === targetUid)
+        if (edge) { selectedEdgeId.value = edge.id; selectedNodeId.value = null }
+      })
+
+      // Double-click on node opens primary field editor
+      drawflowContainer.addEventListener('dblclick', (e) => {
+        const nodeEl = e.target.closest('.drawflow-node')
+        if (nodeEl) {
+          const dfId = parseInt(nodeEl.id.slice(5))
+          const blockUid = dfIdToUid[dfId]
+          if (blockUid) {
+            const node = nodes.value.find(n => n.id === blockUid)
+            if (node) onNodeDoubleClick(node)
+          }
+        }
+      })
+    }
+
     onMounted(async () => {
       try { catalog.value = await api('GET', '/blocks') } catch {}
       try { llmDefaults.value = await api('GET', '/llm-defaults') } catch {}
-      const route = router.currentRoute.value
-      if (route.params.id) await loadPipeline(route.params.id)
+      try { globalVars.value = await api('GET', '/blocks/variables') } catch {}
+
+      // Initialize Drawflow after DOM is ready
+      nextTick(() => {
+        initDrawflow()
+        const route = router.currentRoute.value
+        if (route.params.id) loadPipeline(route.params.id)
+      })
+    })
+    Vue.onUnmounted(() => {
+      if (pipelineEvtSource) { pipelineEvtSource.close(); pipelineEvtSource = null }
+      if (editor) { editor.clear(); editor = null }
     })
 
     // --- Helpers: upstream output fields ---
@@ -726,6 +1461,83 @@ const PipelineEditorPage = defineComponent({
         type: fprop.type || 'any',
         description: fprop.description || '',
       }))
+    }
+
+    // --- Variable autocomplete helpers ---
+    function getAllVariables(nodeId) {
+      // Global vars + upstream output fields
+      const vars = globalVars.value.map(v => ({ ...v, source: 'global', icon: 'public' }))
+      const upstream = getUpstreamFields(nodeId)
+      for (const f of upstream) {
+        vars.push({ name: f.mappedName || f.name, type: f.type, description: `from ${f.sourceLabel}`, source: 'upstream', icon: 'input' })
+      }
+      return vars
+    }
+
+    function showVarAutocomplete(el, nodeId) {
+      const val = el.value
+      const pos = el.selectionStart || 0
+      // Find the opening { before cursor
+      const before = val.slice(0, pos)
+      const braceIdx = before.lastIndexOf('{')
+      if (braceIdx === -1) { varAutocomplete.visible = false; return }
+      // Check there's no } between brace and cursor
+      if (before.indexOf('}', braceIdx) !== -1) { varAutocomplete.visible = false; return }
+      const prefix = before.slice(braceIdx + 1).toLowerCase()
+      const all = getAllVariables(nodeId)
+      const filtered = prefix ? all.filter(v => v.name.toLowerCase().includes(prefix)) : all
+      if (filtered.length === 0) { varAutocomplete.visible = false; return }
+      // Position dropdown below input
+      const rect = el.getBoundingClientRect()
+      varAutocomplete.visible = true
+      varAutocomplete.items = filtered
+      varAutocomplete.x = rect.left
+      varAutocomplete.y = rect.bottom + 2
+      varAutocomplete.inputEl = el
+      varAutocomplete.selected = 0
+      varAutocomplete.prefix = prefix
+      varAutocomplete.braceIdx = braceIdx
+    }
+
+    function insertVariable(varName) {
+      const el = varAutocomplete.inputEl
+      if (!el) return
+      const pos = el.selectionStart || 0
+      const val = el.value
+      const braceIdx = varAutocomplete.braceIdx
+      // Replace from { to cursor with {varName}
+      const newVal = val.slice(0, braceIdx) + '{' + varName + '}' + val.slice(pos)
+      // Trigger input event
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+        || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+      if (nativeInputValueSetter) {
+        nativeInputValueSetter.call(el, newVal)
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+      }
+      varAutocomplete.visible = false
+      nextTick(() => {
+        el.focus()
+        const newPos = braceIdx + varName.length + 2
+        el.setSelectionRange(newPos, newPos)
+      })
+    }
+
+    function handleVarKeydown(e) {
+      if (!varAutocomplete.visible) return
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        varAutocomplete.selected = Math.min(varAutocomplete.selected + 1, varAutocomplete.items.length - 1)
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        varAutocomplete.selected = Math.max(varAutocomplete.selected - 1, 0)
+      } else if (e.key === 'Enter' || e.key === 'Tab') {
+        if (varAutocomplete.items.length > 0) {
+          e.preventDefault()
+          insertVariable(varAutocomplete.items[varAutocomplete.selected].name)
+        }
+      } else if (e.key === 'Escape') {
+        varAutocomplete.visible = false
+      }
     }
 
     // --- Render: single config field ---
@@ -848,10 +1660,14 @@ const PipelineEditorPage = defineComponent({
         })
       }
 
-      // Default text
+      // Default text (with variable autocomplete)
       return h('input', {
         class: 'config-input', type: 'text', placeholder: prop.placeholder || prop.description || '',
-        value: val ?? prop.default ?? '', onInput: (e) => setVal(e.target.value),
+        value: val ?? prop.default ?? '',
+        onInput: (e) => { setVal(e.target.value); showVarAutocomplete(e.target, node.id) },
+        onKeydown: handleVarKeydown,
+        onBlur: () => setTimeout(() => { varAutocomplete.visible = false }, 200),
+        onFocus: (e) => { if (e.target.value.includes('{')) showVarAutocomplete(e.target, node.id) },
       })
     }
 
@@ -888,7 +1704,15 @@ const PipelineEditorPage = defineComponent({
           h('div', { class: 'config-label' }, 'Label'),
           h('input', {
             class: 'config-input', value: data.label,
-            onInput: (e) => { node.data = { ...node.data, label: e.target.value } },
+            onInput: (e) => {
+              node.data = { ...node.data, label: e.target.value }
+              // Sync label to Drawflow DOM
+              const dfId = uidToDfId[node.id]
+              if (dfId != null) {
+                const labelEl = document.querySelector(`#node-${dfId} .block-node__label`)
+                if (labelEl) labelEl.textContent = e.target.value
+              }
+            },
           }),
         ]),
 
@@ -988,6 +1812,99 @@ const PipelineEditorPage = defineComponent({
           ])
         })(),
 
+        // Ports & connections — always shown
+        (() => {
+          const inF = catalogEntry?.input_fittings?.length
+            ? catalogEntry.input_fittings
+            : [{ uid: 'input', label: 'Input', color: '', description: '' }]
+          const outF = catalogEntry?.output_fittings?.length
+            ? catalogEntry.output_fittings
+            : [{ uid: 'output', label: 'Output', color: '', description: '' }]
+          const nodeEdges = edges.value.filter(e => e.source === node.id || e.target === node.id)
+          const portRows = []
+          for (const f of inF) {
+            const conns = nodeEdges.filter(e => e.target === node.id && (e.targetHandle === f.uid || (!e.targetHandle && f.uid === 'input')))
+            const connInfo = conns.map(e => ({ label: nodes.value.find(x => x.id === e.source)?.data?.label || e.source, edgeId: e.id }))
+            portRows.push({ dir: 'in', fitting: f, connInfo })
+          }
+          for (const f of outF) {
+            const conns = nodeEdges.filter(e => e.source === node.id && (e.sourceHandle === f.uid || (!e.sourceHandle && f.uid === 'output')))
+            const connInfo = conns.map(e => ({ label: nodes.value.find(x => x.id === e.target)?.data?.label || e.target, edgeId: e.id }))
+            portRows.push({ dir: 'out', fitting: f, connInfo })
+          }
+          // Get other blocks for the "add connection" dropdown
+          const otherBlocks = nodes.value.filter(n => n.id !== node.id)
+
+          return h('div', { class: 'config-popout__section' }, [
+            h('div', { class: 'config-label', style: 'display:flex; align-items:center; gap:4px' }, [
+              h('span', { class: 'material-icons', style: 'font-size:13px; color:var(--p-primary)' }, 'settings_input_component'),
+              'Ports',
+            ]),
+            h('div', { class: 'port-list' }, portRows.map(r =>
+              h('div', { class: 'port-row', key: r.dir + r.fitting.uid }, [
+                h('span', {
+                  class: 'port-dot',
+                  style: `background:${r.fitting.color || 'var(--p-edge-default)'}`,
+                }),
+                h('span', { class: 'port-dir' }, r.dir === 'in' ? 'IN' : 'OUT'),
+                h('span', { class: 'port-label' }, r.fitting.label),
+                h('span', { class: 'port-conn' }, [
+                  ...r.connInfo.map((c, i) =>
+                    h('span', { key: i, class: 'port-conn__tag' }, [
+                      h('span', { class: 'material-icons', style: 'font-size:10px' }, r.dir === 'in' ? 'arrow_back' : 'arrow_forward'),
+                      c.label,
+                      h('span', {
+                        class: 'material-icons port-conn__remove',
+                        title: 'Remove connection',
+                        onClick: () => {
+                          edges.value = edges.value.filter(e => e.id !== c.edgeId)
+                          pushUndo()
+                        },
+                      }, 'close'),
+                    ])
+                  ),
+                  r.connInfo.length === 0
+                    ? h('span', { class: 'port-conn--none' }, 'none')
+                    : null,
+                  // + button to add connection
+                  otherBlocks.length > 0
+                    ? h('select', {
+                        class: 'port-add-select',
+                        value: '',
+                        title: r.dir === 'out' ? 'Connect to...' : 'Connect from...',
+                        onChange: (ev) => {
+                          const targetId = ev.target.value
+                          ev.target.value = ''
+                          if (!targetId) return
+                          const edgeId = `e-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+                          if (r.dir === 'out') {
+                            edges.value = [...edges.value, {
+                              id: edgeId, source: node.id, target: targetId,
+                              sourceHandle: r.fitting.uid, targetHandle: 'input',
+                              type: 'smoothstep',
+                            }]
+                          } else {
+                            edges.value = [...edges.value, {
+                              id: edgeId, source: targetId, target: node.id,
+                              sourceHandle: 'output', targetHandle: r.fitting.uid,
+                              type: 'smoothstep',
+                            }]
+                          }
+                          pushUndo()
+                        },
+                      }, [
+                        h('option', { value: '' }, '+'),
+                        ...otherBlocks.map(b =>
+                          h('option', { value: b.id, key: b.id }, b.data.label || b.data.blockType)
+                        ),
+                      ])
+                    : null,
+                ]),
+              ])
+            )),
+          ])
+        })(),
+
         // Infrastructure toggle
         infraKeys.length > 0 ? h('div', { class: 'config-popout__section' }, [
           h('button', {
@@ -1029,7 +1946,8 @@ const PipelineEditorPage = defineComponent({
       if (!textModal.value) return null
       const m = textModal.value
       const fields = m.upstreamFields || []
-      const hasFields = fields.length > 0
+      const gvars = globalVars.value || []
+      const hasFields = fields.length > 0 || gvars.length > 0
 
       return h('div', { class: 'text-modal-overlay' }, [
         h('div', { class: 'text-modal', style: hasFields ? 'display:flex; flex-direction:row; gap:0' : '' }, [
@@ -1058,10 +1976,32 @@ const PipelineEditorPage = defineComponent({
             }),
           ]),
 
-          // Upstream fields sidebar
+          // Variables sidebar
           hasFields ? h('div', { class: 'text-modal__fields' }, [
-            h('div', { class: 'text-modal__fields-header' }, 'Available Fields'),
+            h('div', { class: 'text-modal__fields-header' }, 'Variables'),
             h('div', { class: 'text-modal__fields-hint' }, 'Click to insert at cursor'),
+
+            // Global variables
+            gvars.length > 0 ? h('div', { class: 'text-modal__section-label' }, [
+              h('span', { class: 'material-icons', style: 'font-size:12px' }, 'public'), ' Global',
+            ]) : null,
+            ...gvars.map(v => h('button', {
+              key: `global-${v.name}`,
+              class: 'text-modal__field-item',
+              title: v.description,
+              onClick: () => insertAtCursor(`{${v.name}}`),
+            }, [
+              h('code', { class: 'text-modal__field-name' }, `{${v.name}}`),
+              h('div', { class: 'text-modal__field-meta' }, [
+                h('span', { class: 'text-modal__field-type' }, v.type),
+                h('span', { class: 'text-modal__field-source' }, v.description),
+              ]),
+            ])),
+
+            // Upstream fields
+            fields.length > 0 ? h('div', { class: 'text-modal__section-label', style: 'margin-top:8px' }, [
+              h('span', { class: 'material-icons', style: 'font-size:12px' }, 'input'), ' Upstream',
+            ]) : null,
             ...fields.map(f => h('button', {
               key: `${f.sourceLabel}-${f.name}`,
               class: 'text-modal__field-item',
@@ -1118,6 +2058,10 @@ const PipelineEditorPage = defineComponent({
           h('span', { class: 'material-icons', style: 'font-size:16px' }, running.value ? 'hourglass_empty' : 'play_arrow'),
           running.value ? ' Running...' : ' Run',
         ]),
+        hasSchedule.value ? h('span', { class: 'auto-run-badge' }, [
+          h('span', { class: 'material-icons', style: 'font-size:12px; margin-right:3px' }, 'timer'),
+          'Scheduled',
+        ]) : null,
       ]),
 
       // Body: sidebar + main area (canvas + console)
@@ -1159,47 +2103,36 @@ const PipelineEditorPage = defineComponent({
             h('div', { style: 'margin-top:4px; font-size:12px; opacity:0.6' }, `${catalog.value.length} blocks available · or use Presets`),
           ])]) : null,
 
-          h(VueFlow, {
-            nodes: nodes.value, edges: edges.value,
-            'onUpdate:modelValue': () => {},
-            onConnect, onNodeClick, onPaneClick, onNodeDoubleClick,
-            onNodesChange: (changes) => {
-              for (const c of changes) {
-                if (c.type === 'position' && c.position) {
-                  const n = nodes.value.find(n => n.id === c.id)
-                  if (n) n.position = c.position
-                }
+          // Drawflow canvas container — initialized in onMounted
+          h('div', {
+            ref: (el) => {
+              if (el && !drawflowContainer) {
+                drawflowContainer = el
+                nextTick(initDrawflow)
               }
             },
-            fitView: true, class: 'vue-flow', style: { width: '100%', height: '100%' },
-            defaultEdgeOptions: {
-              type: 'smoothstep',
-              style: { stroke: 'var(--p-edge-default)', strokeWidth: 2 },
-              markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--p-edge-default)' },
-            },
-          }, {
-            'node-block': (props) => {
-              const d = props.data, status = d.status || 'idle'
-              const isSelected = selectedNodeId.value === props.id
-              const sc = { running: 'var(--p-node-running)', completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', idle: 'var(--p-node-idle)' }
-              const HandleComp = Vue.resolveComponent('Handle')
-              return h('div', { class: ['block-node', `block-node--${status}`, isSelected && 'block-node--selected'] }, [
-                h(HandleComp, { type: 'target', position: Position.Left, id: 'input', class: 'block-handle' }),
-                h('div', { class: 'block-node__status', style: { background: sc[status] || sc.idle } }),
-                h('div', { class: 'block-node__content' }, [
-                  h('span', { class: 'material-icons block-node__icon' }, blockIcon(d.blockType)),
-                  h('div', null, [
-                    h('div', { class: 'block-node__label' }, d.label),
-                    h('div', { class: 'block-node__type' }, d.blockType),
-                  ]),
-                ]),
-                h(HandleComp, { type: 'source', position: Position.Right, id: 'output', class: 'block-handle' }),
-              ])
-            },
+            style: 'width:100%; height:100%',
           }),
 
           // Config popout (floating over canvas)
           renderConfigPopout(),
+
+          // Variable autocomplete dropdown
+          varAutocomplete.visible ? h('div', {
+            class: 'var-autocomplete',
+            style: { position: 'fixed', left: varAutocomplete.x + 'px', top: varAutocomplete.y + 'px', zIndex: 9999 },
+          }, varAutocomplete.items.map((v, i) =>
+            h('div', {
+              class: 'var-autocomplete__item' + (i === varAutocomplete.selected ? ' var-autocomplete__item--selected' : ''),
+              onMousedown: (e) => { e.preventDefault(); insertVariable(v.name) },
+              onMouseenter: () => { varAutocomplete.selected = i },
+            }, [
+              h('span', { class: 'material-icons', style: 'font-size:12px; color:' + (v.source === 'global' ? 'var(--p-primary)' : 'var(--p-node-completed)') }, v.icon),
+              h('span', { class: 'var-autocomplete__name' }, `{${v.name}}`),
+              h('span', { class: 'var-autocomplete__type' }, v.type),
+              h('span', { class: 'var-autocomplete__desc' }, v.description),
+            ]),
+          )) : null,
         ]),
 
       // Console — always visible, resizable like VS Code terminal
@@ -1295,28 +2228,6 @@ const PipelineEditorPage = defineComponent({
   },
 })
 
-const RunListPage = defineComponent({
-  name: 'RunListPage',
-  setup() {
-    const runs = ref([]); const loading = ref(true)
-    onMounted(async () => { try { runs.value = await api('GET', '/runs') } catch {}; loading.value = false })
-    return () => h('div', { class: 'pipeline-list' }, [
-      h('h2', { style: 'color: var(--p-text)' }, 'Runs'),
-      loading.value ? h('div', { style: 'color: var(--p-text-secondary)' }, 'Loading...')
-        : runs.value.length === 0
-          ? h('div', { style: 'color: var(--p-text-secondary)' }, 'Run history will appear here once pipelines have been executed.')
-          : h('div', { class: 'pipeline-grid' }, runs.value.map(r =>
-              h('div', { class: 'pipeline-card' }, [
-                h('div', { class: 'pipeline-card__name' }, `Run ${(r.id || r._id || '').slice(-8)}`),
-                h('div', { class: 'pipeline-card__meta' }, [
-                  h('span', { class: `status-badge status-badge--${r.status}` }, r.status),
-                  ` · pipeline ${(r.pipeline_id || '').slice(-8)}`,
-                ]),
-              ]),
-            )),
-    ])
-  },
-})
 
 // ---------- Router ----------
 
@@ -1325,7 +2236,6 @@ const router = createRouter({
   routes: [
     { path: '/', component: PipelineListPage },
     { path: '/editor/:id?', component: PipelineEditorPage },
-    { path: '/runs', component: RunListPage },
   ],
 })
 
@@ -1335,12 +2245,30 @@ const App = defineComponent({
   name: 'PlumberApp',
   setup() {
     const themeMenuOpen = ref(false)
+    const userMenuOpen = ref(false)
+    const editingHandle = ref(false)
+    const handleInput = ref('')
     const themes = getAllThemes()
     const currentThemeId = ref(localStorage.getItem('plumber-theme') || 'lodge')
     function switchTheme(id) {
       const t = getTheme(id)
       if (t) { applyTheme(t); currentThemeId.value = id }
       themeMenuOpen.value = false
+    }
+    async function saveHandle() {
+      const h_ = handleInput.value.trim()
+      if (h_) {
+        try {
+          const data = await api('PUT', '/me', { handle: h_ })
+          userHandle.value = data.handle
+        } catch {}
+      }
+      editingHandle.value = false
+      userMenuOpen.value = false
+    }
+    function startEditHandle() {
+      handleInput.value = userHandle.value
+      editingHandle.value = true
     }
     return () => h('div', { class: 'plumber-layout' }, [
       h('div', { class: 'plumber-header' }, [
@@ -1349,13 +2277,11 @@ const App = defineComponent({
           h('a', { class: 'nav-btn', href: '/', onClick: (e) => { e.preventDefault(); router.push('/') } }, [
             h('span', { class: 'material-icons', style: 'font-size:18px' }, 'dashboard'), 'Pipelines',
           ]),
-          h('a', { class: 'nav-btn', href: '/runs', onClick: (e) => { e.preventDefault(); router.push('/runs') } }, [
-            h('span', { class: 'material-icons', style: 'font-size:18px' }, 'play_circle'), 'Runs',
-          ]),
         ]),
         h('div', { class: 'plumber-header__spacer' }),
+        // Theme picker
         h('div', { class: 'theme-dropdown' }, [
-          h('button', { class: 'icon-btn', onClick: () => { themeMenuOpen.value = !themeMenuOpen.value } },
+          h('button', { class: 'icon-btn', onClick: () => { themeMenuOpen.value = !themeMenuOpen.value; userMenuOpen.value = false } },
             [h('span', { class: 'material-icons' }, 'palette')]),
           themeMenuOpen.value && h('div', { class: 'theme-menu' },
             themes.map(t => h('button', { class: 'theme-menu__item', onClick: () => switchTheme(t.id) }, [
@@ -1363,6 +2289,34 @@ const App = defineComponent({
               currentThemeId.value === t.id ? h('span', { class: 'material-icons', style: 'font-size:14px; margin-left:auto; color:var(--p-node-completed)' }, 'check') : null,
             ])),
           ),
+        ]),
+        // User handle
+        h('div', { class: 'user-menu-wrapper' }, [
+          h('button', {
+            class: 'user-badge',
+            onClick: () => { userMenuOpen.value = !userMenuOpen.value; themeMenuOpen.value = false },
+          }, [
+            h('span', { class: 'material-icons', style: 'font-size:18px' }, 'person'),
+            h('span', { class: 'user-badge__name' }, userHandle.value || '...'),
+          ]),
+          userMenuOpen.value && h('div', { class: 'user-menu' }, [
+            editingHandle.value
+              ? h('div', { class: 'user-menu__edit' }, [
+                  h('input', {
+                    class: 'user-menu__input',
+                    value: handleInput.value,
+                    onInput: (e) => { handleInput.value = e.target.value },
+                    onKeydown: (e) => { if (e.key === 'Enter') saveHandle() },
+                    autofocus: true,
+                    maxlength: 32,
+                  }),
+                  h('button', { class: 'toolbar-btn toolbar-btn--primary', style: 'padding:4px 10px; font-size:12px', onClick: saveHandle }, 'Save'),
+                ])
+              : h('button', { class: 'user-menu__item', onClick: startEditHandle }, [
+                  h('span', { class: 'material-icons', style: 'font-size:16px' }, 'edit'),
+                  'Change name',
+                ]),
+          ]),
         ]),
       ]),
       h(Vue.resolveComponent('router-view')),

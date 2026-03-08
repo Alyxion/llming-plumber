@@ -42,13 +42,15 @@ async def create_schedule(
     schedule: Schedule,
     db: AsyncIOMotorDatabase = Depends(get_db),  # type: ignore[type-arg]
 ) -> dict[str, Any]:
-    """Create a new schedule. Computes next_run_at from cron_expression."""
+    """Create a new schedule. Computes next_run_at from cron or interval."""
     if schedule.cron_expression:
         try:
             schedule.next_run_at = _compute_next_run(schedule.cron_expression)
         except (ValueError, KeyError) as exc:
             msg = f"Invalid cron expression: {exc}"
             raise HTTPException(status_code=400, detail=msg)
+    elif schedule.interval_seconds and not schedule.next_run_at:
+        schedule.next_run_at = datetime.now(UTC)
 
     doc = model_to_doc(schedule)
     doc.pop("_id", None)

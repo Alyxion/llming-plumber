@@ -6,6 +6,21 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class FittingDescriptor(BaseModel):
+    """Describes a single input or output socket on a block.
+
+    Blocks with multiple outputs (e.g. cache hit/miss) declare them
+    via ``output_fittings``. The UI renders each as a distinct handle
+    with its own position, color, and tooltip.
+    """
+
+    uid: str
+    label: str
+    kind: str = "output"  # "input" or "output"
+    color: str = ""  # CSS color; empty = default
+    description: str = ""
+
+
 class BlockInput(BaseModel):
     """Base class for all block input models.
 
@@ -76,6 +91,11 @@ class BaseBlock[InputT: BlockInput, OutputT: BlockOutput](ABC):
     fan_out_field: ClassVar[str | None] = None
     # Fan-in: gather all upstream parcels into an ``items`` list input.
     fan_in: ClassVar[bool] = False
+
+    # Override to declare multiple input/output sockets.
+    # When empty, the block has a single "input" and "output" fitting.
+    input_fittings: ClassVar[list[FittingDescriptor]] = []
+    output_fittings: ClassVar[list[FittingDescriptor]] = []
 
     @abstractmethod
     async def execute(self, input: InputT, ctx: BlockContext | None = None) -> OutputT:

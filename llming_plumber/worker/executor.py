@@ -32,6 +32,7 @@ from llming_plumber.blocks.limits import (
 from llming_plumber.blocks.registry import BlockRegistry
 from llming_plumber.models.log import RunLog
 from llming_plumber.models.mongo_helpers import model_to_doc
+from llming_plumber.models.run import BlockLogEntry
 from llming_plumber.models.parcel import Parcel
 from llming_plumber.models.pipeline import (
     BlockDefinition,
@@ -40,6 +41,7 @@ from llming_plumber.models.pipeline import (
 )
 from llming_plumber.worker.console import RunConsole
 from llming_plumber.worker.debug_trace import DebugTracer
+from llming_plumber.worker.events import RunEventPublisher
 
 logger = logging.getLogger(__name__)
 
@@ -143,10 +145,111 @@ def _merge_upstream(
     return merged
 
 
+def _build_global_vars(
+    run_id: str,
+    pipeline_id: str,
+    block_uid: str,
+) -> dict[str, Any]:
+    """Build the global template variables available in every block config."""
+    now = datetime.now(UTC)
+    return {
+        "run_id": run_id,
+        "pipeline_id": pipeline_id,
+        "block_id": block_uid,
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M:%S"),
+        "datetime": now.isoformat(),
+        "hour": now.hour,
+        "minute": now.minute,
+        "weekday": now.strftime("%A"),
+        "weekday_short": now.strftime("%a"),
+        "year": now.year,
+        "month": now.month,
+        "day": now.day,
+        "iso": now.isoformat(),
+        "timestamp": int(now.timestamp()),
+    }
+
+
+# Global variables metadata for the UI autocomplete
+GLOBAL_VARIABLES: list[dict[str, str]] = [
+    {"name": "run_id", "type": "string", "description": "Current run ID"},
+    {"name": "pipeline_id", "type": "string", "description": "Current pipeline ID"},
+    {"name": "block_id", "type": "string", "description": "Current block ID"},
+    {"name": "date", "type": "string", "description": "Current date (YYYY-MM-DD)"},
+    {"name": "time", "type": "string", "description": "Current time (HH:MM:SS)"},
+    {"name": "datetime", "type": "string", "description": "ISO datetime"},
+    {"name": "hour", "type": "integer", "description": "Current hour (0-23)"},
+    {"name": "minute", "type": "integer", "description": "Current minute (0-59)"},
+    {"name": "weekday", "type": "string", "description": "Day name (Monday, etc.)"},
+    {"name": "weekday_short", "type": "string", "description": "Day name short (Mon, etc.)"},
+    {"name": "year", "type": "integer", "description": "Current year"},
+    {"name": "month", "type": "integer", "description": "Current month (1-12)"},
+    {"name": "day", "type": "integer", "description": "Current day of month"},
+    {"name": "iso", "type": "string", "description": "ISO 8601 timestamp"},
+    {"name": "timestamp", "type": "integer", "description": "Unix timestamp"},
+]
+
+
+def _resolve_templates(
+    config: dict[str, Any],
+    global_vars: dict[str, Any],
+    upstream: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve {variable} placeholders in string config values.
+
+    Variables are resolved from global_vars first, then upstream fields.
+    Non-string values pass through unchanged.
+    """
+    context = {**global_vars, **upstream}
+    resolved: dict[str, Any] = {}
+    for key, value in config.items():
+        if isinstance(value, str) and "{" in value:
+            try:
+                resolved[key] = value.format_map(_SafeFormatMap(context))
+            except (KeyError, ValueError, IndexError):
+                resolved[key] = value
+        else:
+            resolved[key] = value
+    return resolved
+
+
+class _SafeFormatMap(dict):  # type: ignore[type-arg]
+    """Dict that returns the original placeholder for missing keys."""
+
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
 def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text
     return text[:max_len] + "… (truncated)"
+
+
+def _humanize_block_error(exc: Exception, label: str) -> dict[str, Any]:
+    """Convert exceptions into human-readable messages with field info."""
+    from pydantic import ValidationError
+
+    if isinstance(exc, ValidationError):
+        fields: list[dict[str, str]] = []
+        parts: list[str] = []
+        for err in exc.errors():
+            loc = err.get("loc", ())
+            field_name = str(loc[-1]) if loc else "unknown"
+            err_type = err.get("type", "")
+            if err_type == "missing":
+                parts.append(f'"{field_name}" is required but has no value')
+                hint = "Connect a pipe to this input, or set a value in the block config"
+            else:
+                msg = err.get("msg", str(err_type))
+                parts.append(f'"{field_name}": {msg}')
+                hint = ""
+            fields.append({"field": field_name, "message": parts[-1], "hint": hint})
+        return {"message": f"{label}: {'; '.join(parts)}", "fields": fields}
+
+    msg = str(exc)[:300]
+    return {"message": f"{label}: {msg}"}
 
 
 class _RunLogger:
@@ -168,6 +271,40 @@ class _RunLogger:
         self._count += 1
 
 
+def _summarize_output(d: dict[str, Any], max_str: int = 200) -> dict[str, Any]:
+    """Create a compact summary of block output for inline logging.
+
+    Large strings are replaced with metadata (length); lists with count;
+    file-like values with filename/size/type metadata.
+    """
+    result: dict[str, Any] = {}
+    for k, v in d.items():
+        if isinstance(v, str):
+            if len(v) > max_str:
+                # Check for file-like fields
+                if any(hint in k.lower() for hint in ("path", "file", "url", "location")):
+                    result[k] = v  # keep paths as-is
+                else:
+                    result[k] = f"({len(v)} chars)"
+            else:
+                result[k] = v
+        elif isinstance(v, list):
+            if len(v) > 5:
+                result[k] = f"({len(v)} items)"
+            else:
+                result[k] = v
+        elif isinstance(v, dict):
+            if len(str(v)) > max_str:
+                result[k] = f"({len(v)} keys)"
+            else:
+                result[k] = v
+        elif isinstance(v, bytes):
+            result[k] = f"({len(v)} bytes)"
+        else:
+            result[k] = v
+    return result
+
+
 async def run_blocks(
     pipeline: PipelineDefinition,
     run_id: str,
@@ -176,6 +313,7 @@ async def run_blocks(
     *,
     tracer: DebugTracer | None = None,
     console: RunConsole | None = None,
+    events: RunEventPublisher | None = None,
 ) -> dict[str, Any]:
     """Execute all blocks in topological order, piping data between them.
 
@@ -201,9 +339,13 @@ async def run_blocks(
     parcels: dict[str, list[Parcel]] = {}
 
     last_output: dict[str, Any] = {}
+    block_log: list[dict[str, Any]] = []
     run_logger = _RunLogger(db)
     run_start = time.monotonic()
     await tracer.record_order(order)
+
+    if events:
+        await events.start(order, len(order))
 
     for block_uid in order:
         # Wall-clock timeout check
@@ -231,6 +373,12 @@ async def run_blocks(
                 "current_block": block_uid,
             }},
         )
+
+        if events:
+            await events.block_start(
+                block_uid, block_def.block_type,
+                block_def.label, order.index(block_uid),
+            )
 
         ctx = BlockContext(
             run_id=run_id,
@@ -289,6 +437,26 @@ async def run_blocks(
                 status="failed",
                 error=str(exc),
             )
+            block_log.append(BlockLogEntry(
+                uid=block_uid, block_type=block_def.block_type,
+                label=block_def.label, status="failed",
+                duration_ms=round(elapsed_ms, 1), parcel_count=0,
+                error=_truncate(str(exc), 500),
+            ).model_dump())
+            # Save partial log even on failure
+            await db["runs"].update_one(
+                {"_id": ObjectId(run_id)},
+                {"$set": {"log": block_log}},
+            )
+            if events:
+                error_info = _humanize_block_error(exc, block_def.label)
+                await events.block_done(
+                    block_uid, block_def.block_type, block_def.label,
+                    duration_ms=elapsed_ms, parcel_count=0,
+                    status="failed", error=error_info["message"],
+                    error_fields=error_info.get("fields"),
+                )
+                await events.error(block_uid, error_info["message"])
             raise
 
         elapsed_ms = (time.monotonic() - start) * 1000
@@ -333,6 +501,41 @@ async def run_blocks(
             [p.fields for p in block_parcels],
         )
 
+        if events:
+            await events.block_done(
+                block_uid, block_def.block_type, block_def.label,
+                duration_ms=elapsed_ms,
+                parcel_count=len(block_parcels),
+                status="completed",
+                output=last_output,
+            )
+
+        block_log.append(BlockLogEntry(
+            uid=block_uid, block_type=block_def.block_type,
+            label=block_def.label, status="completed",
+            duration_ms=round(elapsed_ms, 1),
+            parcel_count=len(block_parcels),
+            output_summary=_summarize_output(last_output),
+        ).model_dump())
+
+    total_ms = (time.monotonic() - run_start) * 1000
+    if events:
+        await events.done(
+            total_ms=total_ms,
+            blocks_run=len(order),
+            status="completed",
+            output=last_output,
+        )
+
+    # Persist inline log on the run document
+    try:
+        await db["runs"].update_one(
+            {"_id": ObjectId(run_id)},
+            {"$set": {"log": block_log}},
+        )
+    except Exception:
+        logger.debug("Failed to save inline block log", exc_info=True)
+
     return last_output
 
 
@@ -354,7 +557,9 @@ async def _execute_single(
 ) -> dict[str, Any]:
     """Run a block once with merged upstream fields."""
     merged = _merge_upstream(block_uid, incoming_pipes, parcels)
-    input_data = input_type(**{**block_def.config, **merged})
+    global_vars = _build_global_vars(ctx.run_id, ctx.pipeline_id, block_uid)
+    resolved_config = _resolve_templates(block_def.config, global_vars, merged)
+    input_data = input_type(**{**resolved_config, **merged})
     output = await block.execute(input_data, ctx)
     output_dict = output.model_dump()
 
@@ -408,6 +613,8 @@ async def _execute_fan_out_branch(
     sem = asyncio.Semaphore(max_conc)
     batch_size = FAN_OUT_BATCH_SIZE
 
+    global_vars = _build_global_vars(ctx.run_id, ctx.pipeline_id, block_uid)
+
     async def _run_one(src_parcel: Parcel) -> BlockOutput:
         async with sem:
             merged = _merge_upstream(
@@ -415,7 +622,8 @@ async def _execute_fan_out_branch(
                 fan_out_parcel=src_parcel,
                 fan_out_source_uid=fan_out_source_uid,
             )
-            inp = input_type(**{**block_def.config, **merged})
+            resolved_config = _resolve_templates(block_def.config, global_vars, merged)
+            inp = input_type(**{**resolved_config, **merged})
             return await block.execute(inp, ctx)
 
     # Process in batches to avoid creating thousands of coroutines at once
@@ -453,7 +661,9 @@ async def _execute_fan_in(
         for p in parcels.get(pipe.source_block_uid, []):
             all_items.append(_apply_pipe_mapping(pipe, p))
 
-    input_data = input_type(**{**block_def.config, "items": all_items})
+    global_vars = _build_global_vars(ctx.run_id, ctx.pipeline_id, block_uid)
+    resolved_config = _resolve_templates(block_def.config, global_vars, {})
+    input_data = input_type(**{**resolved_config, "items": all_items})
     output = await block.execute(input_data, ctx)
     return output.model_dump()
 
@@ -515,6 +725,45 @@ async def _publish_status(
         logger.warning("Failed to publish run update to Redis", exc_info=True)
 
 
+async def _prune_old_runs(db: Any, pipeline_id: Any) -> None:
+    """Keep at most max_runs_per_pipeline runs per pipeline.
+
+    Deletes the oldest finished runs (and their run_logs) beyond the limit.
+    Active runs (queued/running) are never pruned.
+    """
+    from llming_plumber.config import settings
+
+    limit = settings.max_runs_per_pipeline
+    try:
+        # Find IDs of runs to keep (newest N)
+        keep_cursor = db["runs"].find(
+            {"pipeline_id": pipeline_id},
+            {"_id": 1},
+        ).sort("created_at", -1).limit(limit)
+        keep_ids = [doc["_id"] async for doc in keep_cursor]
+
+        if len(keep_ids) < limit:
+            return  # nothing to prune
+
+        # Delete older runs that are finished
+        result = await db["runs"].delete_many({
+            "pipeline_id": pipeline_id,
+            "_id": {"$nin": keep_ids},
+            "status": {"$nin": ["queued", "running"]},
+        })
+        if result.deleted_count:
+            # Also clean up associated run_logs
+            await db["run_logs"].delete_many({
+                "run_id": {"$nin": [str(rid) for rid in keep_ids]},
+            })
+            logger.debug(
+                "Pruned %d old runs for pipeline %s",
+                result.deleted_count, pipeline_id,
+            )
+    except Exception:
+        logger.debug("Run pruning failed", exc_info=True)
+
+
 async def execute_pipeline(ctx: dict, *, run_id: str) -> dict[str, Any]:  # type: ignore[type-arg]
     """ARQ task function.
 
@@ -541,7 +790,10 @@ async def execute_pipeline(ctx: dict, *, run_id: str) -> dict[str, Any]:  # type
 
     await _publish_status(db, run_id, "running", lemming_id)
 
-    pipeline_doc = await db["pipelines"].find_one({"_id": run_doc["pipeline_id"]})
+    pid = run_doc["pipeline_id"]
+    if isinstance(pid, str):
+        pid = ObjectId(pid)
+    pipeline_doc = await db["pipelines"].find_one({"_id": pid})
     if not pipeline_doc:
         await db["runs"].update_one(
             {"_id": ObjectId(run_id)},
@@ -571,11 +823,14 @@ async def execute_pipeline(ctx: dict, *, run_id: str) -> dict[str, Any]:  # type
     console = RunConsole(redis, run_id)
     debug_enabled = run_doc.get("debug", False)
     tracer = DebugTracer(redis, run_id, enabled=debug_enabled)
+    event_pub = RunEventPublisher(redis, run_id, str(run_doc["pipeline_id"]))
+
+    pipeline_id = run_doc["pipeline_id"]
 
     try:
         result = await run_blocks(
             pipeline, run_id, db, lemming_id,
-            tracer=tracer, console=console,
+            tracer=tracer, console=console, events=event_pub,
         )
         await db["runs"].update_one(
             {"_id": ObjectId(run_id)},
@@ -587,6 +842,7 @@ async def execute_pipeline(ctx: dict, *, run_id: str) -> dict[str, Any]:  # type
             },
         )
         await _publish_status(db, run_id, "completed", lemming_id)
+        await _prune_old_runs(db, pipeline_id)
         return result
 
     except Exception as e:
@@ -601,4 +857,9 @@ async def execute_pipeline(ctx: dict, *, run_id: str) -> dict[str, Any]:  # type
             },
         )
         await _publish_status(db, run_id, "failed", lemming_id)
+        await event_pub.done(
+            total_ms=0, blocks_run=0,
+            status="failed",
+        )
+        await _prune_old_runs(db, pipeline_id)
         raise
