@@ -1,0 +1,10 @@
+# Copy to local_sites.toml and fill in your URLs.
+# local_sites.toml is gitignored — it holds customer-specific crawl targets.
+
+[[sites]]
+name = "site-a"
+url  = "https://example.com"
+
+[[sites]]
+name = "site-b"
+url  = "https://example.org"

@@ -102,6 +102,16 @@ class RunEventPublisher:
             data["error_fields"] = error_fields
         await self.publish("block_done", data)
 
+    async def block_progress(
+        self,
+        block_uid: str,
+        message: str,
+    ) -> None:
+        await self.publish("block_progress", {
+            "block_uid": block_uid,
+            "message": message,
+        })
+
     async def error(
         self,
         block_uid: str,

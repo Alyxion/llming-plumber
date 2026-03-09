@@ -120,6 +120,15 @@ class RssReaderBlock(BaseBlock[RssReaderInput, RssReaderOutput]):
 - **Input/Output models are the contract** — the executor validates data against these models when piping between blocks.
 - **Blocks process one item, never batch internally** — a block receives a single input and produces a single output. Iteration over lists (e.g. fetching 100 URLs from a spreadsheet) is handled by the executor's fan-out mechanism, not by building "batch" variants of blocks. This keeps blocks simple, composable, and independently testable. See [Data Piping — Iteration](data-piping.md#4-iteration-list--per-item-branch-execution).
 
+### Block Kinds
+
+Every block has a ``block_kind`` ClassVar — ``"action"`` (default) or ``"resource"``:
+
+- **Action blocks** execute logic: crawl, transform, call APIs, generate documents.
+- **Resource blocks** define connection targets (Azure Blob, S3, SFTP, etc.). They are **not executed** as pipeline steps. The executor reads their config and creates a ``Sink`` that connected action blocks use via ``ctx.sink`` for streaming I/O. This enables memory-efficient stream-like behavior — e.g., a crawler writing 500 pages to Azure writes each page immediately rather than buffering everything in memory.
+
+See [Architecture — Block Kinds](architecture.md#block-kinds--action-vs-resource) for executor details.
+
 ### Standalone Usability
 
 Every block must work **independently** of the Plumber engine. A developer should be able to `pip install llming-plumber` and use a single block without running MongoDB, Redis, or any server:

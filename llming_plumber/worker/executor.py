@@ -201,7 +201,13 @@ def _resolve_templates(
     Variables are resolved from global_vars first, then upstream fields.
     Non-string values pass through unchanged.
     """
-    context = {**global_vars, **upstream}
+    # Only include scalar upstream values — complex objects (lists, dicts)
+    # would be str()-ified by format_map, producing broken {/} patterns
+    # that corrupt downstream template parsers.
+    context = {**global_vars}
+    for k, v in upstream.items():
+        if isinstance(v, (str, int, float, bool)):
+            context[k] = v
     resolved: dict[str, Any] = {}
     for key, value in config.items():
         if isinstance(value, str) and "{" in value:
@@ -332,8 +338,22 @@ async def run_blocks(
 
     # Build a lookup: target_block_uid -> list of pipes feeding into it
     incoming_pipes: dict[str, list[PipeDefinition]] = defaultdict(list)
+    # Build a lookup: source_block_uid -> list of pipes leaving it
+    outgoing_pipes: dict[str, list[PipeDefinition]] = defaultdict(list)
     for pipe in pipeline.pipes:
         incoming_pipes[pipe.target_block_uid].append(pipe)
+        outgoing_pipes[pipe.source_block_uid].append(pipe)
+
+    # Pre-process resource blocks — resolve their config before the main
+    # loop so action blocks can create sinks regardless of topological order.
+    resource_configs: dict[str, dict[str, Any]] = {}
+    for block_def in pipeline.blocks:
+        block_cls = BlockRegistry.get(block_def.block_type)
+        if getattr(block_cls, "block_kind", "action") == "resource":
+            global_vars = _build_global_vars(run_id, pipeline.id, block_def.uid)
+            resource_configs[block_def.uid] = _resolve_templates(
+                block_def.config, global_vars, {},
+            )
 
     # Parcel store: block_uid -> list of Parcels produced by that block
     parcels: dict[str, list[Parcel]] = {}
@@ -379,6 +399,30 @@ async def run_blocks(
 
         block = BlockRegistry.create(block_def.block_type)
         block_cls = type(block)
+
+        # Resource blocks — store config, skip execution
+        if getattr(block_cls, "block_kind", "action") == "resource":
+            global_vars = _build_global_vars(run_id, pipeline.id, block_uid)
+            resolved = _resolve_templates(block_def.config, global_vars, {})
+            resource_configs[block_uid] = resolved
+            await db["runs"].update_one(
+                {"_id": ObjectId(run_id)},
+                {"$set": {
+                    f"block_states.{block_uid}.status": "completed",
+                }},
+            )
+            block_log.append(BlockLogEntry(
+                uid=block_uid, block_type=block_def.block_type,
+                label=block_def.label, status="completed",
+                duration_ms=0, parcel_count=0,
+            ).model_dump())
+            if events:
+                await events.block_done(
+                    block_uid, block_def.block_type, block_def.label,
+                    duration_ms=0, parcel_count=0, status="completed",
+                )
+            continue
+
         input_type, _output_type = _get_input_output_types(block_cls)
 
         fan_out_field: str | None = getattr(block_cls, "fan_out_field", None)
@@ -399,11 +443,17 @@ async def run_blocks(
                 block_def.label, order.index(block_uid),
             )
 
+        # Create sink if this block connects to a resource block
+        sink = _create_sink_for_block(
+            block_uid, outgoing_pipes, block_map, resource_configs,
+        )
+
         ctx = BlockContext(
             run_id=run_id,
             pipeline_id=pipeline.id,
             block_id=block_uid,
             console=console,
+            sink=sink,
         )
 
         start = time.monotonic()
@@ -444,6 +494,12 @@ async def run_blocks(
                     )
 
         except Exception as exc:
+            # Clean up sink on failure
+            if sink is not None:
+                try:
+                    await sink.finalize()
+                except Exception:
+                    pass
             elapsed_ms = (time.monotonic() - start) * 1000
             await _record_block_failure(
                 db, run_id, lemming_id, block_uid, block_def,
@@ -477,6 +533,18 @@ async def run_blocks(
                 )
                 await events.error(block_uid, error_info["message"])
             raise
+
+        # Finalize sink (if any) and merge summary into output
+        if sink is not None:
+            try:
+                sink_summary = await sink.finalize()
+                # Merge sink summary into the output parcel
+                if parcels.get(block_uid):
+                    parcels[block_uid][0].fields.update(
+                        {f"sink_{k}": v for k, v in sink_summary.items()},
+                    )
+            except Exception:
+                logger.warning("Sink finalize failed for %s", block_uid, exc_info=True)
 
         elapsed_ms = (time.monotonic() - start) * 1000
         last_output = (
@@ -561,6 +629,26 @@ async def run_blocks(
 # ------------------------------------------------------------------
 # Internal helpers
 # ------------------------------------------------------------------
+
+
+def _create_sink_for_block(
+    block_uid: str,
+    outgoing_pipes: dict[str, list[PipeDefinition]],
+    block_map: dict[str, BlockDefinition],
+    resource_configs: dict[str, dict[str, Any]],
+) -> Any:
+    """Check if this block connects to a resource block and create a sink."""
+    from llming_plumber.blocks.base import Sink
+
+    for pipe in outgoing_pipes.get(block_uid, []):
+        target_uid = pipe.target_block_uid
+        if target_uid in resource_configs:
+            target_def = block_map[target_uid]
+            target_block = BlockRegistry.create(target_def.block_type)
+            sink = target_block.create_sink(resource_configs[target_uid])
+            if sink is not None:
+                return sink
+    return None
 
 
 async def _execute_single(
@@ -839,10 +927,10 @@ async def execute_pipeline(ctx: dict, *, run_id: str) -> dict[str, Any]:  # type
     except Exception:
         logger.warning("Redis unavailable — console and debug disabled", exc_info=True)
 
-    console = RunConsole(redis, run_id)
+    event_pub = RunEventPublisher(redis, run_id, str(run_doc["pipeline_id"]))
+    console = RunConsole(redis, run_id, events=event_pub)
     debug_enabled = run_doc.get("debug", False)
     tracer = DebugTracer(redis, run_id, enabled=debug_enabled)
-    event_pub = RunEventPublisher(redis, run_id, str(run_doc["pipeline_id"]))
 
     pipeline_id = run_doc["pipeline_id"]
 

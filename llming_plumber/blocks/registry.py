@@ -28,6 +28,7 @@ class BlockMeta(BaseModel):
     """Metadata for a registered block type."""
 
     block_type: str
+    block_kind: str = "action"
     description: str
     icon: str
     categories: list[str]
@@ -193,6 +194,7 @@ class BlockRegistry:
             result.append(
                 BlockMeta(
                     block_type=block_type,
+                    block_kind=getattr(block_cls, "block_kind", "action"),
                     description=getattr(block_cls, "description", ""),
                     icon=getattr(block_cls, "icon", "tabler/puzzle"),
                     categories=getattr(block_cls, "categories", []),

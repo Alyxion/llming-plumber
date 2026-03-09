@@ -84,6 +84,26 @@ _CMPOPS: dict[type, Any] = {
     ast.GtE: operator.ge,
 }
 
+def _safe_join(sep: Any, items: Any) -> str:
+    """Join list items with separator: join("\\n", items)."""
+    if not isinstance(items, (list, tuple)):
+        msg = f"join() requires a list, got {type(items).__name__}"
+        raise SafeEvalError(msg)
+    result = str(sep).join(str(x) for x in items)
+    _check_str(result)
+    return result
+
+
+def _safe_pluck(items: Any, key: Any) -> list[Any]:
+    """Extract a field from each dict: pluck(items, "report")."""
+    if not isinstance(items, (list, tuple)):
+        msg = f"pluck() requires a list, got {type(items).__name__}"
+        raise SafeEvalError(msg)
+    result = [x[key] for x in items if isinstance(x, dict) and key in x]
+    _check_len(result)
+    return result
+
+
 _SAFE_CALLS: dict[str, Any] = {
     "str": str,
     "int": int,
@@ -94,6 +114,9 @@ _SAFE_CALLS: dict[str, Any] = {
     "min": min,
     "max": max,
     "round": round,
+    "chr": chr,
+    "join": _safe_join,
+    "pluck": _safe_pluck,
 }
 
 

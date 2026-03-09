@@ -68,6 +68,7 @@ const BLOCK_ICONS = {
   pegel_online: 'water', azure_blob_write: 'cloud_upload',
   azure_blob_read: 'cloud_download', azure_blob_list: 'folder',
   azure_blob_delete: 'delete', azure_blob_trigger: 'bolt',
+  azure_blob_resource: 'cloud',
   manual_trigger: 'play_circle', read_cache: 'saved_search', store_cache: 'archive',
   variable_store: 'inventory_2', set_variables: 'tune',
   // MongoDB
@@ -264,17 +265,18 @@ function portToFittingUid(fittings, portClass) {
   return fittings[idx]?.uid || (portClass.startsWith('input') ? 'input' : 'output')
 }
 
-function nodeHtml(blockType, label, status, disabled) {
+function nodeHtml(blockType, label, status, disabled, blockKind) {
   const icon = blockIcon(blockType)
   const sc = { running: 'var(--p-node-running)', completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', idle: 'var(--p-node-idle)' }
-  const cls = `block-node block-node--${status || 'idle'}${disabled ? ' block-node--disabled' : ''}`
+  const isResource = blockKind === 'resource'
+  const cls = `block-node block-node--${status || 'idle'}${disabled ? ' block-node--disabled' : ''}${isResource ? ' block-node--resource' : ''}`
   return `<div class="${cls}">
     <div class="block-node__status" style="background:${sc[status] || sc.idle}"></div>
     <div class="block-node__content">
       <span class="material-icons block-node__icon">${icon}</span>
       <div>
         <div class="block-node__label">${label}</div>
-        <div class="block-node__type">${blockType}</div>
+        <div class="block-node__type">${isResource ? 'resource' : blockType}</div>
       </div>
     </div>
   </div>`
@@ -919,8 +921,10 @@ const PipelineEditorPage = defineComponent({
     function addBlock(blockType, label, config, x, y) {
       const blockUid = uid()
       const fittings = getBlockFittings(catalog.value, blockType)
+      const catEntry = catalog.value.find(c => c.block_type === blockType)
+      const blockKind = catEntry?.block_kind || 'action'
       const effectiveLabel = label || blockType.replace(/_/g, ' ')
-      const html = nodeHtml(blockType, effectiveLabel, 'idle')
+      const html = nodeHtml(blockType, effectiveLabel, 'idle', false, blockKind)
 
       const dfId = editor.addNode(blockType, fittings.input.length, fittings.output.length, x, y, blockType, {}, html)
       dfIdToUid[dfId] = blockUid
@@ -928,10 +932,9 @@ const PipelineEditorPage = defineComponent({
 
       nodes.value = [...nodes.value, {
         id: blockUid, position: { x, y },
-        data: { label: effectiveLabel, blockType, config: config || {}, status: 'idle' },
+        data: { label: effectiveLabel, blockType, blockKind, config: config || {}, status: 'idle' },
       }]
 
-      const catEntry = catalog.value.find(c => c.block_type === blockType)
       nextTick(() => applyPortColors(editor, dfId, fittings, catEntry))
       return blockUid
     }
@@ -1078,7 +1081,9 @@ const PipelineEditorPage = defineComponent({
 
       for (const b of blocks) {
         const fittings = getBlockFittings(catalog.value, b.block_type)
-        const html = nodeHtml(b.block_type, b.label, 'idle', b.disabled)
+        const catEntry = catalog.value.find(c => c.block_type === b.block_type)
+        const blockKind = catEntry?.block_kind || 'action'
+        const html = nodeHtml(b.block_type, b.label, 'idle', b.disabled, blockKind)
         const dfId = editor.addNode(
           b.block_type, fittings.input.length, fittings.output.length,
           b.position?.x || 0, b.position?.y || 0, b.block_type, {}, html
@@ -1088,6 +1093,10 @@ const PipelineEditorPage = defineComponent({
         if (b.disabled) {
           const el = document.querySelector(`#node-${dfId}`)
           if (el) el.classList.add('df-disabled')
+        }
+        if (blockKind === 'resource') {
+          const el = document.querySelector(`#node-${dfId}`)
+          if (el) el.classList.add('df-resource')
         }
       }
 
@@ -1197,7 +1206,7 @@ const PipelineEditorPage = defineComponent({
     function subscribePipelineEvents(pid) {
       if (pipelineEvtSource) { pipelineEvtSource.close(); pipelineEvtSource = null }
       pipelineEvtSource = new EventSource(`/api/pipelines/${pid}/events`)
-      for (const evtType of ['start', 'block_start', 'block_done', 'error', 'done']) {
+      for (const evtType of ['start', 'block_start', 'block_done', 'block_progress', 'error', 'done']) {
         pipelineEvtSource.addEventListener(evtType, (e) => {
           try {
             const data = JSON.parse(e.data)
@@ -1237,6 +1246,28 @@ const PipelineEditorPage = defineComponent({
         }
       }
     }
+    function setNodeProgress(nodeId, message) {
+      const dfId = uidToDfId[nodeId]
+      if (dfId == null) return
+      const el = document.getElementById(`node-${dfId}`)
+      if (!el) return
+      let progEl = el.querySelector('.block-node__progress')
+      if (!progEl) {
+        progEl = document.createElement('div')
+        progEl.className = 'block-node__progress'
+        const content = el.querySelector('.block-node__content')
+        if (content) content.parentNode.insertBefore(progEl, content.nextSibling)
+      }
+      progEl.textContent = message
+    }
+    function clearNodeProgress(nodeId) {
+      const dfId = uidToDfId[nodeId]
+      if (dfId == null) return
+      const el = document.getElementById(`node-${dfId}`)
+      if (!el) return
+      const progEl = el.querySelector('.block-node__progress')
+      if (progEl) progEl.remove()
+    }
     function resetAllNodeStatuses() {
       nodes.value = nodes.value.map(n => ({ ...n, data: { ...n.data, status: 'idle', errorFields: [] } }))
       // Reset all Drawflow node DOMs
@@ -1246,6 +1277,8 @@ const PipelineEditorPage = defineComponent({
           const statusEl = el.querySelector('.block-node__status')
           if (statusEl) statusEl.style.background = 'var(--p-node-idle)'
           el.classList.remove('df-status--running', 'df-status--completed', 'df-status--failed')
+          const prog = el.querySelector('.block-node__progress')
+          if (prog) prog.remove()
         }
       }
     }
@@ -1289,7 +1322,7 @@ const PipelineEditorPage = defineComponent({
         try {
           const evtSource = new EventSource(`/api/runs/${runId}/events`)
           evtSource.addEventListener('connected', () => {})
-          for (const evtType of ['start', 'block_start', 'block_done', 'error', 'done']) {
+          for (const evtType of ['start', 'block_start', 'block_done', 'block_progress', 'error', 'done']) {
             evtSource.addEventListener(evtType, (e) => {
               try { handleRunEvent(evtType, JSON.parse(e.data)) } catch {}
               if (evtType === 'done') { evtSource.close(); running.value = false }
@@ -1322,7 +1355,11 @@ const PipelineEditorPage = defineComponent({
             if (e.target === data.block_uid) flashEdge(editor, uidToDfId, e.source, e.target, 'running')
           }
           break
+        case 'block_progress':
+          setNodeProgress(data.block_uid, data.message)
+          break
         case 'block_done':
+          clearNodeProgress(data.block_uid)
           setNodeStatus(data.block_uid, data.status)
           // Flash edges: transition incoming + outgoing to completed/failed with 2s fade
           for (const e of edges.value) {

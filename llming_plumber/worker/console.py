@@ -40,12 +40,14 @@ class RunConsole:
         *,
         ttl: int = CONSOLE_TTL_SECONDS,
         max_entries: int = CONSOLE_MAX_ENTRIES,
+        events: Any = None,
     ) -> None:
         self._redis = redis
         self._run_id = run_id
         self._ttl = ttl
         self._max = max_entries
         self._key = f"plumber:console:{run_id}"
+        self._events = events  # RunEventPublisher for progress events
 
     async def write(
         self,
@@ -74,6 +76,13 @@ class RunConsole:
                 "Console write failed for run %s", self._run_id,
                 exc_info=True,
             )
+
+        # Publish progress event so the UI shows intermediate status
+        if self._events is not None:
+            try:
+                await self._events.block_progress(block_id, message[:200])
+            except Exception:
+                pass
 
 
 async def read_console(

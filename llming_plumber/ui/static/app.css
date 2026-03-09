@@ -781,6 +781,20 @@ body {
   margin-top: 2px;
 }
 
+/* Resource blocks — dashed border, distinct look */
+.block-node--resource {
+  border: 2px dashed var(--p-primary);
+  border-radius: 12px;
+}
+.drawflow .drawflow-node.df-resource {
+  border-style: dashed;
+  border-color: var(--p-primary);
+}
+.block-node--resource .block-node__type {
+  color: var(--p-primary);
+  font-style: italic;
+}
+
 .block-node__status {
   position: absolute;
   top: 6px;
@@ -788,6 +802,22 @@ body {
   width: 6px;
   height: 6px;
   border-radius: 50%;
+}
+
+.block-node__progress {
+  font-size: 10px;
+  color: var(--p-node-running);
+  margin-top: 4px;
+  padding: 2px 4px;
+  max-width: 200px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: progress-fade-in 0.2s ease-out;
+}
+@keyframes progress-fade-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 /* Drawflow edge flash animations (used during pipeline runs) */

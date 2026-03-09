@@ -20,7 +20,16 @@ Plumber uses themed naming. See the glossary in [Data Piping](llming_plumber/doc
 The docs are the source of truth. **Always keep them up to date** — when you change behavior, update the relevant doc in the same change.
 
 - [Architecture](llming_plumber/docs/architecture.md) — deployment modes, ARQ + Redis dispatch, MongoDB collections, run lifecycle, lemming config
-- [Building Blocks](llming_plumber/docs/building-blocks.md) — 67 core block types organized by category with implementation priority tiers
+- [Building Blocks](llming_plumber/docs/building-blocks.md) — index of all 112 blocks with links to per-category reference docs
+  - [Core](llming_plumber/docs/blocks-core.md) — triggers, flow control, transformation, cache, variables (30 blocks)
+  - [Web](llming_plumber/docs/blocks-web.md) — crawler, scraper, snapshots, change detection (6 blocks)
+  - [Documents](llming_plumber/docs/blocks-documents.md) — Excel, PDF, Word, PowerPoint, Parquet, YAML (22 blocks)
+  - [LLM](llming_plumber/docs/blocks-llm.md) — chat, summarization, classification, extraction, translation (9 blocks)
+  - [Data](llming_plumber/docs/blocks-data.md) — files, archives, Redis, MongoDB (32 blocks)
+  - [Azure](llming_plumber/docs/blocks-azure.md) — Blob Storage actions + resource block (6 blocks)
+  - [Weather](llming_plumber/docs/blocks-weather.md) — OpenWeatherMap, DWD (2 blocks)
+  - [News](llming_plumber/docs/blocks-news.md) — RSS, NewsAPI, Tagesschau (3 blocks)
+  - [Government](llming_plumber/docs/blocks-government.md) — Autobahn, NINA, Pegel, Feiertage (4 blocks)
 - [Coding Principles](llming_plumber/docs/coding-principles.md) — async everywhere, type safety, testing, block architecture, standalone usability, MCP tool generation, backward compatibility, extensibility & block discovery, no-code/visual editor parity, i18n
 - [Data Piping](llming_plumber/docs/data-piping.md) — fitting types, type compatibility, coercions, pipe definitions, piping patterns, runtime execution
 

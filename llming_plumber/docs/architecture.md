@@ -246,6 +246,51 @@ db.plumber.schedules.createIndex({ enabled: 1 })
 
 ---
 
+## Block Kinds — Action vs Resource
+
+Every block has a ``block_kind`` ClassVar: ``"action"`` (default) or ``"resource"``.
+
+| Kind | Executed? | Purpose | Examples |
+|---|---|---|---|
+| **Action** | Yes — in topological order | Runs logic, receives/produces parcels | Crawler, LLM, Filter, Text Template |
+| **Resource** | No — config only | Defines a connection target (or source). The executor reads its config and creates a **Sink** (or Source) that connected action blocks use for streaming I/O. | Azure Blob Storage, S3, SFTP |
+
+### Sink — streaming write handle
+
+Resource blocks create ``Sink`` instances via ``create_sink(resolved_config)``.
+Action blocks receive sinks via ``ctx.sink`` and write data incrementally:
+
+```python
+async def execute(self, input, ctx):
+    if ctx and ctx.sink:
+        await ctx.sink.write("html/page.html", html_content)
+        await ctx.sink.write("content.json", manifest_json)
+    # Normal output still flows through parcels
+    return MyOutput(page_count=42)
+```
+
+This enables **stream-like behavior** — data is written to external storage
+as it is produced, not buffered in memory. A crawler writing 500 pages to
+Azure Blob Storage never holds more than one page in memory.
+
+### Executor handling
+
+1. Resource blocks are processed first (topological order places them last,
+   but the executor marks them "completed" immediately without execution).
+2. Before running an action block, the executor checks outgoing pipes for
+   resource targets. If found, it creates a sink from the resource block's
+   config and passes it via ``ctx.sink``.
+3. After the action block finishes, ``sink.finalize()`` is called. The
+   summary (files written, bytes, etc.) is merged into the output parcel
+   with a ``sink_`` prefix.
+
+### Visual distinction
+
+Resource blocks appear with a **dashed border** and italic "resource" type
+label in the editor to distinguish them from executable action blocks.
+
+---
+
 ## Live Run Events (Redis pub/sub → SSE)
 
 The UI **never executes pipelines**. All execution happens on the backend

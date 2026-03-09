@@ -46,6 +46,35 @@ class BlockOutput(BaseModel):
     """Base class for all block output models."""
 
 
+# ------------------------------------------------------------------
+# Sink — streaming write handle provided by resource blocks
+# ------------------------------------------------------------------
+
+
+class Sink(ABC):
+    """Abstract interface for streaming writes to external storage.
+
+    Resource blocks create Sink instances.  Action blocks receive them
+    via ``ctx.sink`` and write data incrementally — no buffering.
+    """
+
+    @abstractmethod
+    async def write(
+        self,
+        path: str,
+        content: str | bytes,
+        *,
+        content_type: str = "",
+        metadata: dict[str, str] | None = None,
+    ) -> None:
+        """Write a single object/file to the sink."""
+        ...
+
+    async def finalize(self) -> dict[str, Any]:
+        """Called when the action block finishes.  Returns summary."""
+        return {}
+
+
 class BlockContext(BaseModel):
     """Runtime context provided by the pipeline executor.
 
@@ -59,6 +88,7 @@ class BlockContext(BaseModel):
     pipeline_id: str = ""
     block_id: str = ""
     console: Any = Field(default=None, exclude=True)
+    sink: Sink | None = Field(default=None, exclude=True)
 
     async def log(
         self,
@@ -79,9 +109,21 @@ class BaseBlock[InputT: BlockInput, OutputT: BlockOutput](ABC):
 
     Every block declares its type, input/output models, and an async execute method.
     Blocks must work standalone with ctx=None.
+
+    Block kinds
+    -----------
+    ``block_kind = "action"`` (default)
+        Executed in sequence.  Receives parcels, runs logic, produces parcels.
+
+    ``block_kind = "resource"``
+        Defines a connection target (Azure Blob, S3, SFTP, ...).  **Not
+        executed** as a pipeline step.  The executor reads its config and
+        creates a :class:`Sink` (or source) that connected action blocks
+        use for streaming I/O.
     """
 
     block_type: ClassVar[str]
+    block_kind: ClassVar[str] = "action"
     cache_ttl: ClassVar[int] = 0
     icon: ClassVar[str] = "tabler/puzzle"
     categories: ClassVar[list[str]] = []
@@ -100,3 +142,7 @@ class BaseBlock[InputT: BlockInput, OutputT: BlockOutput](ABC):
     @abstractmethod
     async def execute(self, input: InputT, ctx: BlockContext | None = None) -> OutputT:
         ...
+
+    def create_sink(self, resolved_config: dict[str, Any]) -> Sink | None:
+        """Create a Sink from this block's config.  Resource blocks override this."""
+        return None

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 from datetime import UTC, datetime
 from typing import Any
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from llming_plumber.api.deps import get_arq_pool, get_db
@@ -134,3 +136,81 @@ async def retry_run(
     await arq_pool.enqueue_job("execute_pipeline", run_id=new_run_id)
 
     return {"run_id": new_run_id, "status": "queued"}
+
+
+@router.get("/{run_id}/blocks/{block_uid}/download")
+async def download_block_output(
+    run_id: str,
+    block_uid: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),  # type: ignore[type-arg]
+) -> Response:
+    """Download a block's output as a file.
+
+    Supports blocks that produce ``archive_base64`` (zip archives),
+    ``file_ref`` (FileRef objects), or ``content`` (raw text).
+    Falls back to JSON dump of the full output.
+    """
+    doc = await db["runs"].find_one({"_id": ObjectId(run_id)})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    run = doc_to_model(doc, Run)
+    block_state = run.block_states.get(block_uid)
+    if block_state is None or block_state.output is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No output for block '{block_uid}' in this run",
+        )
+
+    output = block_state.output
+
+    # Zip archive (zip_create, etc.)
+    if output.get("archive_base64"):
+        raw = base64.b64decode(output["archive_base64"])
+        filename = output.get("blob_path", "").rsplit("/", 1)[-1] or "archive.zip"
+        if not filename.endswith(".zip"):
+            filename += ".zip"
+        return Response(
+            content=raw,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # FileRef
+    if output.get("file_ref"):
+        from llming_plumber.models.file_ref import FileRef
+
+        ref = FileRef(**output["file_ref"])
+        raw = ref.decode()
+        return Response(
+            content=raw,
+            media_type=ref.mime_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{ref.filename}"',
+            },
+        )
+
+    # Azure blob output — redirect to blob URL
+    if output.get("url") and output.get("blob_name"):
+        import json
+
+        # Return metadata as JSON (user can use the URL to download)
+        return Response(
+            content=json.dumps(output, indent=2),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{output["blob_name"].rsplit("/", 1)[-1]}.json"'
+                ),
+            },
+        )
+
+    # Fallback: dump output as JSON
+    import json
+
+    raw = json.dumps(output, ensure_ascii=False, indent=2).encode()
+    return Response(
+        content=raw,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{block_uid}_output.json"'},
+    )
