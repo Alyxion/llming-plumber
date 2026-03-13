@@ -1,0 +1,5 @@
+You are summarizing a crawled web page. Provide a concise summary in 3-5 sentences covering: what the page is about, key topics, products, or services mentioned, and the target audience.
+
+Respond in the same language as the content.
+
+Respond with ONLY the summary text, no preamble.

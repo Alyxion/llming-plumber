@@ -12,10 +12,13 @@ from llming_plumber.blocks.base import BlockContext, Sink
 from llming_plumber.blocks.web.crawler import (
     WebCrawlerBlock,
     WebCrawlerInput,
+    _CHECKPOINT_INTERVAL,
     _extract_links,
     _extract_text,
     _extract_title,
+    _load_crawl_checkpoint,
     _normalize_url,
+    _save_crawl_checkpoint,
     _slugify_domain,
     _url_to_slug,
 )
@@ -285,6 +288,9 @@ class MemorySink(Sink):
     def __init__(self) -> None:
         self.files: dict[str, bytes] = {}
 
+    async def read(self, path: str) -> bytes | None:
+        return self.files.get(path)
+
     async def write(
         self,
         path: str,
@@ -360,3 +366,140 @@ async def test_crawl_without_sink_buffers_html() -> None:
     assert result.page_count == 1
     assert result.pages[0]["html"] != ""
     assert "Content" in result.pages[0]["text"]
+
+
+# --- Checkpoint tests ---
+
+
+@pytest.mark.asyncio
+async def test_load_checkpoint_returns_none_when_empty() -> None:
+    sink = MemorySink()
+    result = await _load_crawl_checkpoint(sink, "test_com", "https://test.com/")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_save_and_load_checkpoint() -> None:
+    sink = MemorySink()
+    await _save_crawl_checkpoint(
+        sink, "test_com", "https://test.com/",
+        "test_com/2026_03_09",
+        {"https://test.com/", "https://test.com/about"},
+        [("https://test.com/products", 1)],
+        [{"url": "https://test.com/", "title": "Home"}],
+    )
+    cp = await _load_crawl_checkpoint(sink, "test_com", "https://test.com/")
+    assert cp is not None
+    assert cp["sink_prefix"] == "test_com/2026_03_09"
+    assert set(cp["visited"]) == {"https://test.com/", "https://test.com/about"}
+    assert cp["queue"] == [["https://test.com/products", 1]]
+    assert len(cp["pages"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_ignored_for_different_url() -> None:
+    sink = MemorySink()
+    await _save_crawl_checkpoint(
+        sink, "test_com", "https://test.com/old",
+        "test_com/2026_03_09", set(), [], [],
+    )
+    result = await _load_crawl_checkpoint(sink, "test_com", "https://test.com/new")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_ignored_after_completion() -> None:
+    """A completed checkpoint should not be loaded."""
+    sink = MemorySink()
+    # Save in-progress checkpoint
+    await _save_crawl_checkpoint(
+        sink, "test_com", "https://test.com/",
+        "test_com/2026_03_09", set(), [], [],
+    )
+    # Mark as completed (simulates _clear_crawl_checkpoint)
+    from llming_plumber.blocks.web.crawler import _clear_crawl_checkpoint
+    await _clear_crawl_checkpoint(sink, "test_com")
+
+    result = await _load_crawl_checkpoint(sink, "test_com", "https://test.com/")
+    assert result is None
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_crawl_saves_checkpoint_periodically() -> None:
+    """Checkpoint is saved every _CHECKPOINT_INTERVAL pages."""
+    # Create enough pages to trigger at least one checkpoint
+    num_pages = _CHECKPOINT_INTERVAL + 2
+    home_links = "\n".join(
+        f'<a href="/p{i}">P{i}</a>' for i in range(num_pages)
+    )
+    home_html = f"<html><body>{home_links}</body></html>"
+    respx.get("https://test.com/").mock(
+        return_value=httpx.Response(200, text=home_html, headers={"content-type": "text/html"})
+    )
+    for i in range(num_pages):
+        respx.get(f"https://test.com/p{i}").mock(
+            return_value=httpx.Response(
+                200,
+                text=f"<html><head><title>P{i}</title></head><body>Page {i}</body></html>",
+                headers={"content-type": "text/html"},
+            )
+        )
+
+    sink = MemorySink()
+    ctx = BlockContext(sink=sink)
+    block = WebCrawlerBlock()
+    await block.execute(
+        WebCrawlerInput(
+            start_url="https://test.com/",
+            max_pages=num_pages + 1,
+            delay_seconds=0,
+        ),
+        ctx,
+    )
+
+    # Checkpoint file should exist (marked as completed after crawl)
+    cp_path = "test_com/_crawl_checkpoint.json"
+    assert cp_path in sink.files
+    cp = json.loads(sink.files[cp_path])
+    assert cp["status"] == "completed"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_crawl_resumes_from_checkpoint() -> None:
+    """When a checkpoint exists, the crawler skips already-visited pages."""
+    # Simulate a checkpoint with 1 page done
+    sink = MemorySink()
+    # Pre-populate the checkpoint
+    checkpoint = {
+        "status": "in_progress",
+        "start_url": "https://test.com/",
+        "sink_prefix": "test_com/2026_03_09",
+        "visited": ["https://test.com/"],
+        "queue": [["https://test.com/about", 1]],
+        "pages": [{"url": "https://test.com/", "title": "Home", "status_code": 200,
+                    "content_length": 50, "depth": 0, "content_hash": "abc", "links_found": 1,
+                    "text": "", "html": ""}],
+        "last_updated": "2026-03-09T01:00:00",
+    }
+    sink.files["test_com/_crawl_checkpoint.json"] = json.dumps(checkpoint).encode()
+
+    # Only mock /about — the root should NOT be re-fetched
+    about_html = '<html><head><title>About</title></head><body>About us</body></html>'
+    respx.get("https://test.com/about").mock(
+        return_value=httpx.Response(200, text=about_html, headers={"content-type": "text/html"})
+    )
+
+    ctx = BlockContext(sink=sink)
+    block = WebCrawlerBlock()
+    result = await block.execute(
+        WebCrawlerInput(start_url="https://test.com/", max_pages=10, delay_seconds=0),
+        ctx,
+    )
+
+    # Should have 2 pages total (1 from checkpoint + 1 newly crawled)
+    assert result.page_count == 2
+    # Files written to the checkpoint's sink_prefix, not current date
+    html_files = [k for k in sink.files if "/html/" in k]
+    assert any("2026_03_09" in f for f in html_files)

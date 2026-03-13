@@ -16,7 +16,7 @@ class TestSettings:
         assert s.redis_url == "redis://localhost:6379/0"
         assert s.mode == "all"
         assert s.lemming_concurrency == 4
-        assert s.run_timeout == 3600
+        assert s.run_timeout == 7200
         assert s.health_check_interval == 30
         assert s.api_prefix == "/api"
         assert s.host == "0.0.0.0"

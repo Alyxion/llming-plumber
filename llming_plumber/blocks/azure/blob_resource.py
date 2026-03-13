@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
@@ -25,6 +26,7 @@ from llming_plumber.blocks.base import (
     BlockContext,
     BlockInput,
     BlockOutput,
+    FileInfo,
     Sink,
 )
 
@@ -64,6 +66,61 @@ class AzureBlobSink(Sink):
                 self._conn_str,
             )
         return self._service
+
+    async def read(self, path: str) -> bytes | None:
+        """Download a blob by relative path.  Returns None if not found."""
+        service = await self._get_service()
+        full_path = f"{self._base_path}/{path}" if self._base_path else path
+        blob_client = service.get_blob_client(
+            container=self._container, blob=full_path,
+        )
+        try:
+            stream = await blob_client.download_blob()
+            return await stream.readall()
+        except Exception:
+            return None
+
+    async def list(  # type: ignore[override]
+        self,
+        prefix: str = "",
+        pattern: str = "*",
+    ) -> AsyncIterator[FileInfo]:
+        """List blobs under base_path/prefix matching the glob pattern."""
+        import fnmatch
+
+        service = await self._get_service()
+        container_client = service.get_container_client(self._container)
+        full_prefix = (
+            f"{self._base_path}/{prefix}" if self._base_path else prefix
+        )
+        full_prefix = full_prefix.rstrip("/")
+        if full_prefix:
+            full_prefix += "/"
+
+        async for blob in container_client.list_blobs(
+            name_starts_with=full_prefix,
+        ):
+            name: str = blob.name
+            filename = name.rsplit("/", 1)[-1]
+            if not filename:
+                continue
+            if pattern != "*" and not fnmatch.fnmatch(filename, pattern):
+                continue
+            # Relative path (strip base_path prefix)
+            if self._base_path and name.startswith(self._base_path):
+                rel_path = name[len(self._base_path) :].lstrip("/")
+            else:
+                rel_path = name
+            cs = getattr(blob, "content_settings", None)
+            ct = cs.content_type if cs and hasattr(cs, "content_type") else ""
+            lm = getattr(blob, "last_modified", None)
+            yield FileInfo(
+                path=rel_path,
+                filename=filename,
+                size_bytes=getattr(blob, "size", 0) or 0,
+                modified_iso=lm.isoformat() if lm else "",
+                content_type=ct or "",
+            )
 
     async def write(
         self,

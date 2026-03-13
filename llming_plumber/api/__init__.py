@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from llming_plumber.api.blocks import router as blocks_router
 from llming_plumber.api.demo import router as demo_router
 from llming_plumber.api.events import router as events_router
+from llming_plumber.api.files import router as files_router
 from llming_plumber.api.health import router as health_router
 from llming_plumber.api.inline_run import router as inline_run_router
 from llming_plumber.api.llm_defaults import router as llm_defaults_router
@@ -27,4 +28,5 @@ router.include_router(llm_defaults_router, tags=["llm"])
 router.include_router(health_router, tags=["health"])
 router.include_router(session_router, tags=["session"])
 router.include_router(variables_router, prefix="/variables", tags=["variables"])
+router.include_router(files_router, tags=["files"])
 router.include_router(demo_router, prefix="/demo-pipelines", tags=["demo"])

@@ -207,6 +207,58 @@ def _url_to_slug(url: str) -> str:
     return slug or "index"
 
 
+_CHECKPOINT_INTERVAL = 10  # save crawl state every N pages
+
+
+async def _load_crawl_checkpoint(
+    sink: Any, domain_slug: str, start_url: str,
+) -> dict[str, Any] | None:
+    """Load an in-progress crawl checkpoint from the sink."""
+    path = f"{domain_slug}/_crawl_checkpoint.json"
+    raw = await sink.read(path)
+    if raw is None:
+        return None
+    try:
+        cp = json.loads(raw)
+        if cp.get("start_url") == start_url and cp.get("status") == "in_progress":
+            return cp
+    except Exception:
+        pass
+    return None
+
+
+async def _save_crawl_checkpoint(
+    sink: Any,
+    domain_slug: str,
+    start_url: str,
+    sink_prefix: str,
+    visited: set[str],
+    queue: list[tuple[str, int]],
+    pages: list[dict[str, Any]],
+) -> None:
+    """Save crawl state checkpoint to the sink."""
+    path = f"{domain_slug}/_crawl_checkpoint.json"
+    checkpoint = {
+        "status": "in_progress",
+        "start_url": start_url,
+        "sink_prefix": sink_prefix,
+        "visited": list(visited),
+        "queue": queue,
+        "pages": pages,
+        "last_updated": datetime.now(UTC).isoformat(),
+    }
+    await sink.write(path, json.dumps(checkpoint, ensure_ascii=False))
+
+
+async def _clear_crawl_checkpoint(sink: Any, domain_slug: str) -> None:
+    """Mark checkpoint as completed so the next run starts fresh."""
+    path = f"{domain_slug}/_crawl_checkpoint.json"
+    await sink.write(path, json.dumps({
+        "status": "completed",
+        "completed_at": datetime.now(UTC).isoformat(),
+    }))
+
+
 class WebCrawlerBlock(BaseBlock[WebCrawlerInput, WebCrawlerOutput]):
     block_type: ClassVar[str] = "web_crawler"
     icon: ClassVar[str] = "tabler/spider"
@@ -222,6 +274,7 @@ class WebCrawlerBlock(BaseBlock[WebCrawlerInput, WebCrawlerOutput]):
         has_sink = ctx is not None and ctx.sink is not None
         parsed_start = urlparse(input.start_url)
         domain = parsed_start.netloc
+        domain_slug = _slugify_domain(domain)
         errors: list[str] = []
 
         url_re = re.compile(input.url_pattern) if input.url_pattern else None
@@ -235,6 +288,23 @@ class WebCrawlerBlock(BaseBlock[WebCrawlerInput, WebCrawlerOutput]):
         queue: list[tuple[str, int]] = [(start_normalized, 0)]
         visited: set[str] = set()
         pages: list[dict[str, Any]] = []
+        sink_prefix = f"{domain_slug}/{now_date}"
+
+        # Resume from checkpoint if available
+        if has_sink:
+            checkpoint = await _load_crawl_checkpoint(
+                ctx.sink, domain_slug, input.start_url,  # type: ignore[union-attr]
+            )
+            if checkpoint is not None:
+                visited = set(checkpoint["visited"])
+                queue = [(u, d) for u, d in checkpoint["queue"]]
+                pages = checkpoint["pages"]
+                sink_prefix = checkpoint["sink_prefix"]
+                if ctx:
+                    await ctx.log(
+                        f"Resuming crawl: {len(pages)} pages done, "
+                        f"{len(queue)} URLs pending"
+                    )
 
         # Browser-realistic headers to avoid anti-bot filters
         headers = {
@@ -333,7 +403,6 @@ class WebCrawlerBlock(BaseBlock[WebCrawlerInput, WebCrawlerOutput]):
 
                     # Stream to sink — write files immediately, don't buffer
                     if has_sink:
-                        sink_prefix = f"{_slugify_domain(domain)}/{now_date}"
                         await ctx.sink.write(  # type: ignore[union-attr]
                             f"{sink_prefix}/html/{path_slug}.html",
                             html,
@@ -342,6 +411,13 @@ class WebCrawlerBlock(BaseBlock[WebCrawlerInput, WebCrawlerOutput]):
                             await ctx.sink.write(  # type: ignore[union-attr]
                                 f"{sink_prefix}/text/{path_slug}.txt",
                                 text,
+                            )
+                        # Periodic checkpoint for resumability
+                        if len(pages) % _CHECKPOINT_INTERVAL == 0:
+                            await _save_crawl_checkpoint(
+                                ctx.sink,  # type: ignore[union-attr]
+                                domain_slug, input.start_url,
+                                sink_prefix, visited, queue, pages,
                             )
 
                     if ctx:
@@ -361,7 +437,6 @@ class WebCrawlerBlock(BaseBlock[WebCrawlerInput, WebCrawlerOutput]):
 
         # Write manifest to sink
         if has_sink and pages:
-            sink_prefix = f"{_slugify_domain(domain)}/{now_date}"
             manifest = {
                 "domain": domain,
                 "crawled_at": datetime.now(UTC).isoformat(),
@@ -385,6 +460,15 @@ class WebCrawlerBlock(BaseBlock[WebCrawlerInput, WebCrawlerOutput]):
                 f"{sink_prefix}/content.json",
                 json.dumps(manifest, ensure_ascii=False, indent=2),
             )
+
+        # Clear checkpoint — crawl completed successfully
+        if has_sink:
+            try:
+                await _clear_crawl_checkpoint(
+                    ctx.sink, domain_slug,  # type: ignore[union-attr]
+                )
+            except Exception:
+                pass
 
         if ctx:
             await ctx.log(f"Crawl complete: {len(pages)} pages in {elapsed:.1f}s, {len(errors)} errors")

@@ -122,6 +122,8 @@ Each blob gets:
 
 **Visual distinction:** Resource blocks appear with a dashed border and italic "resource" label in the UI editor.
 
+**File browser:** Blocks connected to a resource block support the built-in [file browser](file-browser.md) — browse, search, and preview files from past runs directly in the UI.
+
 **Example pipeline — crawl to cloud:**
 ```
 [Web Crawler] ──pipe──→ [Azure Blob Resource]

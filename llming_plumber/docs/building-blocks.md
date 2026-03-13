@@ -1,6 +1,6 @@
 # Building Blocks
 
-> Plumber ships with **112 blocks** across 9 categories. Each block is a self-contained unit that can be used standalone or wired into pipelines.
+> Plumber ships with **116 blocks** across 9 categories. Each block is a self-contained unit that can be used standalone or wired into pipelines.
 
 ---
 
@@ -10,11 +10,11 @@ Detailed documentation for every block, organized by topic:
 
 | Category | Blocks | Documentation |
 |----------|--------|---------------|
-| **Core** — triggers, flow control, data transformation, utilities | 30 | [blocks-core.md](blocks-core.md) |
+| **Core** — triggers, flow control, data transformation, utilities | 31 | [blocks-core.md](blocks-core.md) |
 | **Web** — crawling, scraping, monitoring, change detection | 6 | [blocks-web.md](blocks-web.md) |
 | **Documents** — Excel, PDF, Word, PowerPoint, Parquet, YAML | 22 | [blocks-documents.md](blocks-documents.md) |
-| **LLM** — chat, summarization, classification, extraction, translation | 9 | [blocks-llm.md](blocks-llm.md) |
-| **Data** — file operations, archives, Redis, MongoDB | 32 | [blocks-data.md](blocks-data.md) |
+| **LLM** — chat, summarization, classification, extraction, translation | 10 | [blocks-llm.md](blocks-llm.md) |
+| **Data** — file operations, archives, Redis, MongoDB, storage I/O | 34 | [blocks-data.md](blocks-data.md) |
 | **Azure** — Blob Storage read/write/list/delete, triggers, resource | 6 | [blocks-azure.md](blocks-azure.md) |
 | **Weather** — OpenWeatherMap, DWD (German Meteorological Service) | 2 | [blocks-weather.md](blocks-weather.md) |
 | **News** — RSS feeds, NewsAPI, Tagesschau | 3 | [blocks-news.md](blocks-news.md) |

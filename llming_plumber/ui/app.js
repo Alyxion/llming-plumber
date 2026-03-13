@@ -86,6 +86,14 @@ const BLOCK_ICONS = {
   // Files
   file_list: 'folder_open', file_read: 'file_open', file_write: 'save',
   file_collector: 'create_new_folder', file_move: 'drive_file_move', file_delete: 'delete_forever',
+  // Flow
+  unite: 'merge',
+  // LLM
+  sink_scanner: 'document_scanner',
+  content_summarizer: 'document_scanner',
+  // Data / Storage
+  sink_file_iterator: 'manage_search',
+  sink_file_writer: 'upload_file',
 }
 function blockIcon(bt) { return BLOCK_ICONS[bt] || 'extension' }
 
@@ -878,6 +886,223 @@ const PipelineEditorPage = defineComponent({
     // Modal editor for multiline fields
     const textModal = ref(null) // { nodeId, key, title, value }
 
+    // --- File browser ---
+    // State: { blockUid, versions, selectedVersion, files, path, content, search,
+    //          treeLoading, contentLoading, contentProgress, error, _htmlView, _reqId }
+    const fileBrowser = ref(null)
+    let _fbReqCounter = 0 // monotonic counter to discard stale responses
+
+    function _fbUpdate(patch) {
+      if (fileBrowser.value) fileBrowser.value = { ...fileBrowser.value, ...patch }
+    }
+
+    async function openFileBrowser(blockUid) {
+      const reqId = ++_fbReqCounter
+      fileBrowser.value = {
+        blockUid, versions: [], selectedVersion: null, files: null, path: [],
+        content: null, search: '', treeLoading: true, contentLoading: false,
+        contentProgress: '', error: null, _htmlView: 'raw', _linksCollapsed: true, _reqId: reqId,
+      }
+      try {
+        const versions = await api('GET', `/pipelines/${pipelineId.value}/blocks/${blockUid}/versions?limit=20`)
+        if (fileBrowser.value?._reqId !== reqId) return
+        _fbUpdate({ versions, treeLoading: false })
+        if (versions.length > 0) selectFileVersion(versions[0])
+      } catch (err) {
+        if (fileBrowser.value?._reqId !== reqId) return
+        _fbUpdate({ treeLoading: false, error: 'Failed to load versions' })
+      }
+    }
+
+    async function selectFileVersion(version) {
+      if (!fileBrowser.value) return
+      const reqId = ++_fbReqCounter
+      _fbUpdate({ selectedVersion: version, files: null, path: [], content: null, treeLoading: true, error: null, _manifest: null, _urlMap: null, _reqId: reqId })
+      try {
+        const files = await api('GET', `/runs/${version.run_id}/blocks/${fileBrowser.value.blockUid}/files`)
+        if (fileBrowser.value?._reqId !== reqId) return
+        _fbUpdate({ files, treeLoading: false })
+        // Auto-load manifest: look for content.json in the listed files
+        const manifestFile = files?.files?.find(f => f.name === 'content.json')
+        if (manifestFile) _fbLoadManifest(manifestFile.path, reqId)
+      } catch {
+        if (fileBrowser.value?._reqId !== reqId) return
+        _fbUpdate({ files: null, treeLoading: false, error: 'Failed to load files' })
+      }
+    }
+
+    async function _fbLoadManifest(manifestPath, reqId) {
+      try {
+        const fb = fileBrowser.value
+        if (!fb?.selectedVersion) return
+        const resp = await fetch(`/api/runs/${fb.selectedVersion.run_id}/blocks/${fb.blockUid}/files/content?path=${encodeURIComponent(manifestPath)}`)
+        if (!resp.ok || fileBrowser.value?._reqId !== reqId) return
+        const manifest = await resp.json()
+        const basePath = manifestPath.substring(0, manifestPath.lastIndexOf('/'))
+        const urlMap = new Map()
+        for (const page of manifest.pages || []) {
+          if (page.url && page.html_file) {
+            urlMap.set(page.url, {
+              blobPath: basePath + '/' + page.html_file,
+              textPath: page.text_file ? basePath + '/' + page.text_file : null,
+              title: page.title || '',
+              htmlFile: page.html_file,
+            })
+          }
+        }
+        if (fileBrowser.value?._reqId !== reqId) return
+        _fbUpdate({ _manifest: manifest, _urlMap: urlMap })
+      } catch { /* manifest is optional */ }
+    }
+
+    function _fbExtractLinks(html, currentPageUrl) {
+      const links = []
+      const seen = new Set()
+      // Parse href attributes from anchor tags
+      const re = /<a\s[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi
+      let match
+      while ((match = re.exec(html)) !== null) {
+        let href = match[1]
+        const text = match[2].replace(/<[^>]+>/g, '').trim()
+        if (!href || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('javascript:')) continue
+        try {
+          const resolved = new URL(href, currentPageUrl).href
+          if (!seen.has(resolved)) {
+            seen.add(resolved)
+            links.push({ href: resolved, text: text || href })
+          }
+        } catch { /* malformed URL */ }
+      }
+      return links
+    }
+
+    function _fbOpenCachedLink(blobPath) {
+      // Navigate to the cached file within the file browser
+      const parts = blobPath.split('/')
+      const fileName = parts.pop()
+      // Navigate the tree to the folder containing this file
+      const fb = fileBrowser.value
+      if (!fb?.selectedVersion) return
+      const baseParts = (fb.selectedVersion.base_path || '').split('/').filter(Boolean)
+      // The folder path relative to base_path
+      const relParts = parts.slice(baseParts.length)
+      navigateFileBrowserTo(relParts)
+      // Preview the file
+      previewFile({ path: blobPath, name: fileName, size: 0 })
+    }
+
+    async function _fbLoadFolder(newPath, reqId) {
+      if (!fileBrowser.value?.selectedVersion) return
+      const fb = fileBrowser.value
+      const prefix = newPath.join('/')
+      try {
+        const files = await api('GET', `/runs/${fb.selectedVersion.run_id}/blocks/${fb.blockUid}/files?prefix=${encodeURIComponent(prefix)}`)
+        if (fileBrowser.value?._reqId !== reqId) return
+        _fbUpdate({ files, treeLoading: false })
+      } catch {
+        if (fileBrowser.value?._reqId !== reqId) return
+        _fbUpdate({ treeLoading: false, error: 'Failed to load folder' })
+      }
+    }
+
+    function navigateFileBrowser(folder) {
+      if (!fileBrowser.value?.selectedVersion) return
+      const newPath = [...fileBrowser.value.path, folder]
+      const reqId = ++_fbReqCounter
+      _fbUpdate({ path: newPath, content: null, treeLoading: true, error: null, _reqId: reqId })
+      _fbLoadFolder(newPath, reqId)
+    }
+
+    function navigateFileBrowserUp() {
+      if (!fileBrowser.value || fileBrowser.value.path.length === 0) return
+      const newPath = fileBrowser.value.path.slice(0, -1)
+      const reqId = ++_fbReqCounter
+      _fbUpdate({ path: newPath, content: null, treeLoading: true, error: null, _reqId: reqId })
+      _fbLoadFolder(newPath, reqId)
+    }
+
+    function navigateFileBrowserTo(pathArr) {
+      const reqId = ++_fbReqCounter
+      _fbUpdate({ path: pathArr, content: null, treeLoading: true, error: null, _reqId: reqId })
+      _fbLoadFolder(pathArr, reqId)
+    }
+
+    async function previewFile(file) {
+      if (!fileBrowser.value?.selectedVersion) return
+      const fb = fileBrowser.value
+      const reqId = ++_fbReqCounter
+      const sizeHint = file.size ? ` (${_fmtBytes(file.size)})` : ''
+      _fbUpdate({ contentLoading: true, contentProgress: `Downloading${sizeHint}...`, error: null, _reqId: reqId })
+      try {
+        const url = `/api/runs/${fb.selectedVersion.run_id}/blocks/${fb.blockUid}/files/content?path=${encodeURIComponent(file.path)}`
+        const resp = await fetch(url)
+        if (fileBrowser.value?._reqId !== reqId) return
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+        const ct = resp.headers.get('content-type') || ''
+        const contentLength = parseInt(resp.headers.get('content-length') || '0', 10)
+
+        // Binary/too-large stub from server
+        if (ct.includes('application/json') && !file.path.endsWith('.json')) {
+          const meta = await resp.json()
+          if (fileBrowser.value?._reqId !== reqId) return
+          _fbUpdate({ content: { type: 'meta', data: meta, file }, contentLoading: false, contentProgress: '' })
+          return
+        }
+
+        // Stream the body with progress for larger files
+        if (contentLength > 50_000 && resp.body) {
+          const reader = resp.body.getReader()
+          const chunks = []
+          let received = 0
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            chunks.push(value)
+            received += value.length
+            if (fileBrowser.value?._reqId !== reqId) { reader.cancel(); return }
+            const pct = contentLength ? Math.round(received / contentLength * 100) : 0
+            _fbUpdate({ contentProgress: `${_fmtBytes(received)} / ${_fmtBytes(contentLength)} (${pct}%)` })
+          }
+          const text = new TextDecoder().decode(_concatUint8(chunks))
+          if (fileBrowser.value?._reqId !== reqId) return
+          const isHtml = ct.includes('text/html') || file.name.endsWith('.html') || file.name.endsWith('.htm')
+          _fbUpdate({ content: { type: isHtml ? 'html' : 'text', data: text, file, contentType: ct }, contentLoading: false, contentProgress: '' })
+        } else {
+          // Small file — just read it directly
+          _fbUpdate({ contentProgress: 'Reading...' })
+          const text = await resp.text()
+          if (fileBrowser.value?._reqId !== reqId) return
+          const isHtml = ct.includes('text/html') || file.name.endsWith('.html') || file.name.endsWith('.htm')
+          _fbUpdate({ content: { type: isHtml ? 'html' : 'text', data: text, file, contentType: ct }, contentLoading: false, contentProgress: '' })
+        }
+      } catch (err) {
+        if (fileBrowser.value?._reqId !== reqId) return
+        _fbUpdate({ content: null, contentLoading: false, contentProgress: '', error: `Preview failed: ${err.message}` })
+      }
+    }
+
+    function _concatUint8(chunks) {
+      const total = chunks.reduce((s, c) => s + c.length, 0)
+      const result = new Uint8Array(total)
+      let offset = 0
+      for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.length }
+      return result
+    }
+
+    function _fmtBytes(b) {
+      if (b == null || b === 0) return '0 B'
+      if (b < 1024) return `${b} B`
+      if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`
+      return `${(b / (1024 * 1024)).toFixed(1)} MB`
+    }
+
+    function fileBrowserHasFiles(blockUid) {
+      const node = nodes.value.find(n => n.id === blockUid)
+      if (!node) return false
+      // Only show on the sink/resource block itself
+      return node.data.blockKind === 'resource'
+    }
+
     const groupedCatalog = computed(() => {
       const map = new Map()
       const q = search.value.toLowerCase()
@@ -953,18 +1178,36 @@ const PipelineEditorPage = defineComponent({
       if (selectedNodeId.value === nodeId) selectedNodeId.value = null
     }
 
-    function toggleBlockDisabled(nodeId) {
+    async function toggleBlockDisabled(nodeId) {
       const node = nodes.value.find(n => n.id === nodeId)
       if (!node) return
       const nowDisabled = !node.data.disabled
+      // Optimistic update
       node.data = { ...node.data, disabled: nowDisabled }
       const dfId = uidToDfId[nodeId]
       if (dfId != null) {
         const el = document.querySelector(`#node-${dfId}`)
         if (el) el.classList.toggle('df-disabled', nowDisabled)
-        const html = nodeHtml(node.data.blockType, node.data.label, node.data.status, nowDisabled)
+        const html = nodeHtml(node.data.blockType, node.data.label, node.data.status, nowDisabled, node.data.blockKind)
         const contentEl = el?.querySelector('.drawflow_content_node')
         if (contentEl) contentEl.innerHTML = html
+      }
+      // Persist immediately if pipeline is saved
+      if (pipelineId.value) {
+        try {
+          await api('PATCH', `/pipelines/${pipelineId.value}/blocks/${nodeId}/disabled`, { disabled: nowDisabled })
+        } catch (err) {
+          // Revert on failure
+          node.data = { ...node.data, disabled: !nowDisabled }
+          if (dfId != null) {
+            const el = document.querySelector(`#node-${dfId}`)
+            if (el) el.classList.toggle('df-disabled', !nowDisabled)
+            const html = nodeHtml(node.data.blockType, node.data.label, node.data.status, !nowDisabled, node.data.blockKind)
+            const contentEl = el?.querySelector('.drawflow_content_node')
+            if (contentEl) contentEl.innerHTML = html
+          }
+          showStatus(`Failed to toggle: ${err.message}`)
+        }
       }
     }
 
@@ -1114,10 +1357,13 @@ const PipelineEditorPage = defineComponent({
       }
       _programmaticChange = false
 
-      nodes.value = blocks.map(b => ({
-        id: b.uid, position: { x: b.position?.x || 0, y: b.position?.y || 0 },
-        data: { label: b.label, blockType: b.block_type, config: b.config || {}, status: 'idle', disabled: !!b.disabled },
-      }))
+      nodes.value = blocks.map(b => {
+        const catEntry = catalog.value.find(c => c.block_type === b.block_type)
+        return {
+          id: b.uid, position: { x: b.position?.x || 0, y: b.position?.y || 0 },
+          data: { label: b.label, blockType: b.block_type, blockKind: catEntry?.block_kind || 'action', config: b.config || {}, status: 'idle', disabled: !!b.disabled },
+        }
+      })
 
       Object.keys(edgeFieldMappings).forEach(k => delete edgeFieldMappings[k])
       edges.value = pipes.map(p => {
@@ -2056,6 +2302,19 @@ const PipelineEditorPage = defineComponent({
           ])
         })(),
 
+        // Browse Files button (for blocks with file sinks)
+        fileBrowserHasFiles(node.id) && pipelineId.value
+          ? h('div', { class: 'config-popout__section' }, [
+              h('button', {
+                class: 'toolbar-btn toolbar-btn--ghost', style: 'width:100%; justify-content:center; gap:6px',
+                onClick: () => openFileBrowser(node.id),
+              }, [
+                h('span', { class: 'material-icons', style: 'font-size:16px' }, 'folder_open'),
+                'Browse Files',
+              ]),
+            ])
+          : null,
+
         // Infrastructure toggle
         infraKeys.length > 0 ? h('div', { class: 'config-popout__section' }, [
           h('button', {
@@ -2167,6 +2426,284 @@ const PipelineEditorPage = defineComponent({
               f.title !== f.name ? h('div', { class: 'text-modal__field-desc' }, f.title) : null,
             ])),
           ]) : null,
+        ]),
+      ])
+    }
+
+    function renderFileBrowser() {
+      const fb = fileBrowser.value
+      if (!fb) return null
+
+      const fmtDate = (d) => d ? new Date(d).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''
+      const fileIcon = (name) => {
+        if (name.endsWith('.html') || name.endsWith('.htm')) return 'code'
+        if (name.endsWith('.json')) return 'data_object'
+        if (name.endsWith('.txt')) return 'description'
+        if (name.endsWith('.csv')) return 'table_chart'
+        if (name.endsWith('.xml')) return 'code'
+        if (name.endsWith('.pdf')) return 'picture_as_pdf'
+        return 'insert_drive_file'
+      }
+
+      // Filter files by search query
+      const q = fb.search.toLowerCase()
+      const filteredFiles = fb.files?.files?.filter(f => !q || f.name.toLowerCase().includes(q)) || []
+      const filteredFolders = fb.files?.folders?.filter(f => !q || f.toLowerCase().includes(q)) || []
+      const totalInFolder = (fb.files?.total_files || 0) + (fb.files?.total_folders || 0)
+
+      // Content search within previewed file
+      let contentSearchCount = 0
+      let highlightedContent = null
+      if (fb.content?.type === 'text' && fb.search && fb.content.data) {
+        const parts = fb.content.data.split(new RegExp(`(${fb.search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'))
+        contentSearchCount = Math.floor(parts.length / 2)
+        highlightedContent = parts
+      }
+
+      // Spinner helper
+      const spinner = (msg) => h('div', { class: 'fb-spinner-wrap' }, [
+        h('div', { class: 'fb-spinner' }),
+        msg ? h('div', { class: 'fb-spinner-msg' }, msg) : null,
+      ])
+
+      return h('div', { class: 'fb-overlay', onClick: () => { fileBrowser.value = null } }, [
+        h('div', { class: 'fb-modal', onClick: (e) => e.stopPropagation() }, [
+          // Header
+          h('div', { class: 'fb-header' }, [
+            h('span', { class: 'material-icons', style: 'font-size:20px; color:var(--p-primary)' }, 'folder_open'),
+            h('span', { class: 'fb-header__title' }, 'File Browser'),
+            // Version selector
+            fb.versions.length > 0 ? h('select', {
+              class: 'fb-version-select',
+              value: fb.selectedVersion?.run_id || '',
+              disabled: fb.treeLoading,
+              onChange: (e) => {
+                const v = fb.versions.find(v => v.run_id === e.target.value)
+                if (v) selectFileVersion(v)
+              },
+            }, fb.versions.map(v => h('option', { value: v.run_id, key: v.run_id },
+              `${fmtDate(v.created_at)} — ${v.files_written || '?'} files (${_fmtBytes(v.total_bytes)})`
+            ))) : null,
+            h('div', { style: 'flex:1' }),
+            // Search
+            h('div', { class: 'fb-search-wrap' }, [
+              h('span', { class: 'material-icons', style: 'font-size:14px; color:var(--p-text-secondary)' }, 'search'),
+              h('input', {
+                class: 'fb-search', placeholder: 'Search files or content...',
+                value: fb.search, onInput: (e) => { _fbUpdate({ search: e.target.value }) },
+              }),
+              contentSearchCount > 0 ? h('span', { class: 'fb-search-count' }, `${contentSearchCount} matches`) : null,
+            ]),
+            h('button', { class: 'icon-btn', onClick: () => { fileBrowser.value = null } },
+              [h('span', { class: 'material-icons', style: 'font-size:18px' }, 'close')]),
+          ]),
+
+          // Error bar
+          fb.error ? h('div', { class: 'fb-error' }, [
+            h('span', { class: 'material-icons', style: 'font-size:14px' }, 'error_outline'),
+            fb.error,
+          ]) : null,
+
+          // Body
+          h('div', { class: 'fb-body' }, [
+            // Left: file tree
+            h('div', { class: 'fb-tree' }, [
+              // Breadcrumb
+              fb.selectedVersion ? h('div', { class: 'fb-breadcrumb' }, [
+                h('button', {
+                  class: 'fb-breadcrumb__item',
+                  disabled: fb.treeLoading,
+                  onClick: () => navigateFileBrowserTo([]),
+                }, [h('span', { class: 'material-icons', style: 'font-size:14px' }, 'home')]),
+                ...fb.path.map((seg, i) => [
+                  h('span', { class: 'fb-breadcrumb__sep' }, '/'),
+                  h('button', {
+                    class: 'fb-breadcrumb__item', key: i,
+                    disabled: fb.treeLoading,
+                    onClick: () => navigateFileBrowserTo(fb.path.slice(0, i + 1)),
+                  }, seg),
+                ]).flat(),
+                // Folder item count
+                !fb.treeLoading && totalInFolder > 0
+                  ? h('span', { class: 'fb-breadcrumb__count' }, `${totalInFolder} items`)
+                  : null,
+              ]) : null,
+
+              // Tree loading indicator bar
+              fb.treeLoading ? h('div', { class: 'fb-progress-bar' }, [h('div', { class: 'fb-progress-bar__fill' })]) : null,
+
+              // File listing
+              fb.treeLoading && !fb.files
+                ? spinner('Loading files...')
+                : !fb.selectedVersion
+                  ? spinner(fb.treeLoading ? 'Loading versions...' : 'No versions found')
+                  : h('div', { class: 'fb-list' + (fb.treeLoading ? ' fb-list--busy' : '') }, [
+                      // Up button
+                      fb.path.length > 0 ? h('div', {
+                        class: 'fb-item fb-item--folder', onClick: navigateFileBrowserUp,
+                      }, [
+                        h('span', { class: 'material-icons fb-item__icon' }, 'arrow_upward'),
+                        h('span', { class: 'fb-item__name' }, '..'),
+                      ]) : null,
+
+                      // Folders
+                      ...filteredFolders.map(folder => h('div', {
+                        class: 'fb-item fb-item--folder', key: `d-${folder}`,
+                        onClick: () => navigateFileBrowser(folder),
+                      }, [
+                        h('span', { class: 'material-icons fb-item__icon' }, 'folder'),
+                        h('span', { class: 'fb-item__name' }, folder),
+                      ])),
+
+                      // Files
+                      ...filteredFiles.map(file => h('div', {
+                        class: 'fb-item' + (fb.content?.file?.path === file.path ? ' fb-item--active' : '')
+                          + (fb.contentLoading && fb.content === null && fb._previewPath === file.path ? ' fb-item--loading' : ''),
+                        key: `f-${file.name}`,
+                        onClick: () => { _fbUpdate({ _previewPath: file.path }); previewFile(file) },
+                      }, [
+                        h('span', { class: 'material-icons fb-item__icon' }, fileIcon(file.name)),
+                        h('span', { class: 'fb-item__name' }, file.name),
+                        h('span', { class: 'fb-item__size' }, _fmtBytes(file.size)),
+                      ])),
+
+                      // Empty state
+                      filteredFolders.length === 0 && filteredFiles.length === 0
+                        ? h('div', { class: 'fb-empty' }, q ? 'No files match your search' : 'No files in this folder')
+                        : null,
+                    ]),
+            ]),
+
+            // Right: preview
+            h('div', { class: 'fb-preview' }, [
+              fb.contentLoading
+                ? spinner(fb.contentProgress || 'Loading preview...')
+                : fb.content === null
+                  ? h('div', { class: 'fb-preview-empty' }, [
+                      h('span', { class: 'material-icons', style: 'font-size:48px; opacity:0.3' }, 'preview'),
+                      h('div', { style: 'margin-top:8px' }, 'Select a file to preview'),
+                    ])
+                  : fb.content.type === 'meta'
+                    ? h('div', { class: 'fb-preview-meta' }, [
+                        h('span', { class: 'material-icons', style: 'font-size:32px; opacity:0.5' }, 'block'),
+                        h('div', null, fb.content.data.reason === 'too_large'
+                          ? `File too large for preview (${_fmtBytes(fb.content.data.size)})`
+                          : `Binary file (${fb.content.data.content_type})`),
+                        h('div', { style: 'font-size:11px; color:var(--p-text-secondary); margin-top:4px' }, fb.content.file.path),
+                      ])
+                    : fb.content.type === 'html'
+                      ? h('div', { class: 'fb-preview-content' }, [
+                          h('div', { class: 'fb-preview-tabs' }, [
+                            h('span', { class: 'fb-preview-filename' }, fb.content.file.name),
+                            h('span', { class: 'fb-preview-filesize' }, _fmtBytes(fb.content.data.length)),
+                            h('div', { style: 'flex:1' }),
+                            h('button', {
+                              class: 'fb-tab' + (fb._htmlView !== 'rendered' ? ' fb-tab--active' : ''),
+                              onClick: () => { _fbUpdate({ _htmlView: 'raw' }) },
+                            }, 'Raw'),
+                            h('button', {
+                              class: 'fb-tab' + (fb._htmlView === 'rendered' ? ' fb-tab--active' : ''),
+                              onClick: () => { _fbUpdate({ _htmlView: 'rendered' }) },
+                            }, 'Preview'),
+                          ]),
+                          // Link panel — shows hyperlinks found in the HTML with cached/external indicators
+                          (() => {
+                            if (!fb._urlMap || !fb.content?.data) return null
+                            let currentPageUrl = ''
+                            if (fb._manifest?.pages) {
+                              const page = fb._manifest.pages.find(p => fb.content.file.path.endsWith(p.html_file))
+                              if (page) currentPageUrl = page.url
+                            }
+                            const links = _fbExtractLinks(fb.content.data, currentPageUrl)
+                            if (!links.length) return null
+                            const cached = links.filter(l => fb._urlMap.has(l.href))
+                            const collapsed = fb._linksCollapsed !== false
+                            return h('div', { class: 'fb-link-panel' }, [
+                              h('div', {
+                                class: 'fb-link-panel__header',
+                                onClick: () => _fbUpdate({ _linksCollapsed: !collapsed }),
+                              }, [
+                                h('span', { class: 'material-icons', style: 'font-size:16px; margin-right:4px' }, collapsed ? 'expand_more' : 'expand_less'),
+                                `Links (${links.length} found, ${cached.length} cached)`,
+                              ]),
+                              !collapsed ? h('div', { class: 'fb-link-panel__list' },
+                                links.map(link => {
+                                  const info = fb._urlMap.get(link.href)
+                                  return h('div', { class: 'fb-link-item' + (info ? ' fb-link-item--cached' : '') }, [
+                                    h('span', { class: 'fb-link-item__text', title: link.href }, link.text || link.href),
+                                    info ? h('span', { class: 'fb-link-badge' }, 'cached') : null,
+                                    info ? h('button', {
+                                      class: 'fb-link-btn',
+                                      title: 'View cached version',
+                                      onClick: () => _fbOpenCachedLink(info.blobPath),
+                                    }, [h('span', { class: 'material-icons', style: 'font-size:14px' }, 'folder_open')]) : null,
+                                    h('a', {
+                                      class: 'fb-link-btn',
+                                      href: link.href,
+                                      target: '_blank',
+                                      rel: 'noopener',
+                                      title: 'Open in browser',
+                                    }, [h('span', { class: 'material-icons', style: 'font-size:14px' }, 'open_in_new')]),
+                                  ])
+                                })
+                              ) : null,
+                            ])
+                          })(),
+                          fb._htmlView === 'rendered'
+                            ? h('iframe', {
+                                class: 'fb-iframe',
+                                srcdoc: fb.content.data,
+                                sandbox: 'allow-same-origin',
+                              })
+                            : h('pre', { class: 'fb-code' },
+                                highlightedContent
+                                  ? highlightedContent.map((part, i) =>
+                                      i % 2 === 1 ? h('mark', { class: 'fb-highlight' }, part) : part
+                                    )
+                                  : fb.content.data
+                              ),
+                        ])
+                      : h('div', { class: 'fb-preview-content' }, [
+                          h('div', { class: 'fb-preview-tabs' }, [
+                            h('span', { class: 'fb-preview-filename' }, fb.content.file.name),
+                            h('span', { class: 'fb-preview-filesize' }, _fmtBytes(fb.content.data.length)),
+                          ]),
+                          // Source page bar — for text files with manifest, show original URL + cached HTML link
+                          (() => {
+                            if (!fb._manifest?.pages) return null
+                            const page = fb._manifest.pages.find(p => fb.content.file.path.endsWith(p.text_file || '___'))
+                            if (!page) return null
+                            const basePath = fb.content.file.path.substring(0, fb.content.file.path.lastIndexOf('/'))
+                            const htmlBasePath = basePath.replace(/\/text$/, '/html')
+                            return h('div', { class: 'fb-link-panel' }, [
+                              h('div', { class: 'fb-link-panel__header', style: 'cursor:default' }, [
+                                h('span', { class: 'material-icons', style: 'font-size:14px; margin-right:4px' }, 'language'),
+                                h('span', { style: 'flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap' }, page.url),
+                                page.html_file ? h('button', {
+                                  class: 'fb-link-btn',
+                                  title: 'View cached HTML',
+                                  onClick: () => _fbOpenCachedLink(htmlBasePath + '/' + page.html_file.replace(/^html\//, '')),
+                                }, [h('span', { class: 'material-icons', style: 'font-size:14px' }, 'folder_open'), ' HTML']) : null,
+                                h('a', {
+                                  class: 'fb-link-btn',
+                                  href: page.url,
+                                  target: '_blank',
+                                  rel: 'noopener',
+                                  title: 'Open in browser',
+                                }, [h('span', { class: 'material-icons', style: 'font-size:14px' }, 'open_in_new')]),
+                              ]),
+                            ])
+                          })(),
+                          h('pre', { class: 'fb-code' },
+                            highlightedContent
+                              ? highlightedContent.map((part, i) =>
+                                  i % 2 === 1 ? h('mark', { class: 'fb-highlight' }, part) : part
+                                )
+                              : fb.content.data
+                          ),
+                        ]),
+            ]),
+          ]),
         ]),
       ])
     }
@@ -2401,6 +2938,9 @@ const PipelineEditorPage = defineComponent({
 
       // Text editor modal
       renderTextModal(),
+
+      // File browser modal
+      renderFileBrowser(),
     ])
   },
 })

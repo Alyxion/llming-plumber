@@ -357,12 +357,22 @@ async def run_blocks(
 
     # Parcel store: block_uid -> list of Parcels produced by that block
     parcels: dict[str, list[Parcel]] = {}
+    # Track blocks that failed but were tolerated (for unite-style blocks)
+    failed_blocks: dict[str, str] = {}
 
     last_output: dict[str, Any] = {}
     block_log: list[dict[str, Any]] = []
     run_logger = _RunLogger(db)
     run_start = time.monotonic()
     await tracer.record_order(order)
+
+    # Load existing block states for resume — completed blocks are skipped
+    run_doc = await db["runs"].find_one({"_id": ObjectId(run_id)})
+    saved_states: dict[str, dict[str, Any]] = {}
+    if run_doc:
+        raw_states = run_doc.get("block_states", {})
+        if isinstance(raw_states, dict):
+            saved_states = raw_states
 
     if events:
         await events.start(order, len(order))
@@ -397,6 +407,59 @@ async def run_blocks(
                 )
             continue
 
+        # Resume: skip completed blocks and restore their parcels
+        saved = saved_states.get(block_uid)
+        if (
+            isinstance(saved, dict)
+            and saved.get("status") == "completed"
+            and saved.get("output") is not None
+        ):
+            saved_output = saved["output"]
+            saved_parcels_raw = saved.get("_parcels")
+            if saved_parcels_raw and isinstance(saved_parcels_raw, list):
+                parcels[block_uid] = [
+                    Parcel(uid=block_uid, fields=p) for p in saved_parcels_raw
+                ]
+            else:
+                block_cls_r = BlockRegistry.get(block_def.block_type)
+                fan_out_field_r: str | None = getattr(
+                    block_cls_r, "fan_out_field", None,
+                )
+                if fan_out_field_r and fan_out_field_r in saved_output:
+                    items = saved_output[fan_out_field_r]
+                    parcels[block_uid] = [
+                        Parcel(
+                            uid=block_uid,
+                            fields=(
+                                item if isinstance(item, dict) else {"item": item}
+                            ),
+                        )
+                        for item in items
+                    ] or [Parcel(uid=block_uid, fields=saved_output)]
+                else:
+                    parcels[block_uid] = [
+                        Parcel(uid=block_uid, fields=saved_output),
+                    ]
+            last_output = saved_output
+            block_log.append(BlockLogEntry(
+                uid=block_uid, block_type=block_def.block_type,
+                label=block_def.label, status="resumed",
+                duration_ms=saved.get("duration_ms", 0),
+                parcel_count=len(parcels[block_uid]),
+            ).model_dump())
+            if console:
+                await console.write(
+                    block_uid, "Resumed from checkpoint (skipped)",
+                )
+            if events:
+                await events.block_done(
+                    block_uid, block_def.block_type, block_def.label,
+                    duration_ms=saved.get("duration_ms", 0),
+                    parcel_count=len(parcels[block_uid]),
+                    status="resumed",
+                )
+            continue
+
         block = BlockRegistry.create(block_def.block_type)
         block_cls = type(block)
 
@@ -409,6 +472,10 @@ async def run_blocks(
                 {"_id": ObjectId(run_id)},
                 {"$set": {
                     f"block_states.{block_uid}.status": "completed",
+                    f"block_states.{block_uid}.resource_config": {
+                        k: v for k, v in resolved.items()
+                        if k != "connection_string"
+                    },
                 }},
             )
             block_log.append(BlockLogEntry(
@@ -447,6 +514,10 @@ async def run_blocks(
         sink = _create_sink_for_block(
             block_uid, outgoing_pipes, block_map, resource_configs,
         )
+        # Create source sink if an incoming pipe comes from a resource block
+        source_sink = _create_source_sink_for_block(
+            block_uid, incoming_pipes, block_map, resource_configs,
+        )
 
         ctx = BlockContext(
             run_id=run_id,
@@ -454,6 +525,7 @@ async def run_blocks(
             block_id=block_uid,
             console=console,
             sink=sink,
+            source_sink=source_sink,
         )
 
         start = time.monotonic()
@@ -463,6 +535,9 @@ async def run_blocks(
                 output_dict = await _execute_fan_in(
                     block, input_type, block_def, block_uid,
                     incoming_pipes, parcels, ctx,
+                    failed_blocks=failed_blocks if getattr(
+                        block_cls, "tolerate_upstream_errors", False,
+                    ) else None,
                 )
                 parcels[block_uid] = [
                     Parcel(uid=block_uid, fields=output_dict),
@@ -494,10 +569,15 @@ async def run_blocks(
                     )
 
         except Exception as exc:
-            # Clean up sink on failure
+            # Clean up sinks on failure
             if sink is not None:
                 try:
                     await sink.finalize()
+                except Exception:
+                    pass
+            if source_sink is not None:
+                try:
+                    await source_sink.finalize()
                 except Exception:
                     pass
             elapsed_ms = (time.monotonic() - start) * 1000
@@ -532,9 +612,19 @@ async def run_blocks(
                     error_fields=error_info.get("fields"),
                 )
                 await events.error(block_uid, error_info["message"])
+
+            # Check if all downstream blocks tolerate upstream errors.
+            # If so, record the failure and continue instead of aborting.
+            if _can_continue_after_failure(
+                block_uid, outgoing_pipes, block_map,
+            ):
+                failed_blocks[block_uid] = str(exc)
+                parcels[block_uid] = []
+                continue
+
             raise
 
-        # Finalize sink (if any) and merge summary into output
+        # Finalize sinks (if any) and merge summary into output
         if sink is not None:
             try:
                 sink_summary = await sink.finalize()
@@ -545,6 +635,11 @@ async def run_blocks(
                     )
             except Exception:
                 logger.warning("Sink finalize failed for %s", block_uid, exc_info=True)
+        if source_sink is not None:
+            try:
+                await source_sink.finalize()
+            except Exception:
+                logger.warning("Source sink finalize failed for %s", block_uid, exc_info=True)
 
         elapsed_ms = (time.monotonic() - start) * 1000
         last_output = (
@@ -564,13 +659,24 @@ async def run_blocks(
         )
         await run_logger.write(log_entry)
 
-        # Update block state — status and timing only, no output content
+        # Update block state — always persist output for resume capability
         state_update: dict[str, Any] = {
             f"block_states.{block_uid}.status": "completed",
             f"block_states.{block_uid}.duration_ms": elapsed_ms,
+            f"block_states.{block_uid}.output": last_output,
         }
-        if LOG_BLOCK_OUTPUT:
-            state_update[f"block_states.{block_uid}.output"] = last_output
+        # Store individual parcels for fan-out resume
+        block_parcels_for_save = parcels.get(block_uid, [])
+        if len(block_parcels_for_save) > 1:
+            state_update[f"block_states.{block_uid}._parcels"] = [
+                p.fields for p in block_parcels_for_save
+            ]
+        # Always store sink metadata so the file browser can find files
+        if sink is not None:
+            for sk in ("sink_container", "sink_base_path", "sink_files_written",
+                        "sink_total_bytes", "sink_retention_days"):
+                if sk in last_output:
+                    state_update[f"block_states.{block_uid}.{sk}"] = last_output[sk]
         await db["runs"].update_one(
             {"_id": ObjectId(run_id)},
             {"$set": state_update},
@@ -631,6 +737,34 @@ async def run_blocks(
 # ------------------------------------------------------------------
 
 
+def _can_continue_after_failure(
+    failed_uid: str,
+    outgoing_pipes: dict[str, list[PipeDefinition]],
+    block_map: dict[str, BlockDefinition],
+) -> bool:
+    """Check if all direct downstream blocks tolerate upstream errors.
+
+    Returns True only when every block that directly depends on the
+    failed block has ``tolerate_upstream_errors = True``.  If there are
+    no downstream blocks, returns False (normal abort behaviour).
+    """
+    downstream_uids: list[str] = [
+        p.target_block_uid for p in outgoing_pipes.get(failed_uid, [])
+    ]
+    if not downstream_uids:
+        return False
+
+    for uid in downstream_uids:
+        target_def = block_map.get(uid)
+        if target_def is None:
+            return False
+        target_cls = BlockRegistry.get(target_def.block_type)
+        if not getattr(target_cls, "tolerate_upstream_errors", False):
+            return False
+
+    return True
+
+
 def _create_sink_for_block(
     block_uid: str,
     outgoing_pipes: dict[str, list[PipeDefinition]],
@@ -646,6 +780,24 @@ def _create_sink_for_block(
             target_def = block_map[target_uid]
             target_block = BlockRegistry.create(target_def.block_type)
             sink = target_block.create_sink(resource_configs[target_uid])
+            if sink is not None:
+                return sink
+    return None
+
+
+def _create_source_sink_for_block(
+    block_uid: str,
+    incoming_pipes: dict[str, list[PipeDefinition]],
+    block_map: dict[str, BlockDefinition],
+    resource_configs: dict[str, dict[str, Any]],
+) -> Any:
+    """Check if any incoming pipe comes from a resource block — create a read sink."""
+    for pipe in incoming_pipes.get(block_uid, []):
+        source_uid = pipe.source_block_uid
+        if source_uid in resource_configs:
+            source_def = block_map[source_uid]
+            source_block = BlockRegistry.create(source_def.block_type)
+            sink = source_block.create_sink(resource_configs[source_uid])
             if sink is not None:
                 return sink
     return None
@@ -761,12 +913,28 @@ async def _execute_fan_in(
     incoming_pipes: dict[str, list[PipeDefinition]],
     parcels: dict[str, list[Parcel]],
     ctx: BlockContext,
+    *,
+    failed_blocks: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Gather all upstream parcels into an ``items`` list and execute once."""
+    """Gather all upstream parcels into an ``items`` list and execute once.
+
+    When *failed_blocks* is provided, include error markers for upstream
+    blocks that failed so the block can handle them (e.g. unite block).
+    """
     all_items: list[dict[str, Any]] = []
     for pipe in incoming_pipes.get(block_uid, []):
-        for p in parcels.get(pipe.source_block_uid, []):
-            all_items.append(_apply_pipe_mapping(pipe, p))
+        src_uid = pipe.source_block_uid
+        src_parcels = parcels.get(src_uid, [])
+        if src_parcels:
+            for p in src_parcels:
+                all_items.append(_apply_pipe_mapping(pipe, p))
+        elif failed_blocks and src_uid in failed_blocks:
+            # Deliver an error marker so the block knows this upstream failed
+            all_items.append({
+                "_error": True,
+                "_block_uid": src_uid,
+                "_message": failed_blocks[src_uid],
+            })
 
     global_vars = _build_global_vars(ctx.run_id, ctx.pipeline_id, block_uid)
     resolved_config = _resolve_templates(block_def.config, global_vars, {})

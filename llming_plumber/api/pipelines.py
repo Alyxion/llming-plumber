@@ -205,6 +205,36 @@ async def update_pipeline(
     return doc_to_model(doc, PipelineDefinition).model_dump(mode="json")
 
 
+@router.patch("/{pipeline_id}/blocks/{block_uid}/disabled")
+async def set_block_disabled(
+    pipeline_id: str,
+    block_uid: str,
+    body: dict[str, Any] = Body(...),
+    db: AsyncIOMotorDatabase = Depends(get_db),  # type: ignore[type-arg]
+    user: str = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Toggle a block's disabled state without saving the entire pipeline."""
+    await require_pipeline_access(pipeline_id, db, user)
+    disabled = bool(body.get("disabled", False))
+
+    result = await db["pipelines"].update_one(
+        {"_id": ObjectId(pipeline_id), "blocks.uid": block_uid},
+        {"$set": {
+            "blocks.$.disabled": disabled,
+            "updated_at": datetime.now(UTC),
+        }},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Block not found in pipeline")
+
+    # Re-sync timer schedule if the toggled block is a timer_trigger
+    pipeline_doc = await db["pipelines"].find_one({"_id": ObjectId(pipeline_id)})
+    if pipeline_doc:
+        await _sync_timer_schedule(db, pipeline_id, pipeline_doc.get("blocks", []))
+
+    return {"block_uid": block_uid, "disabled": disabled}
+
+
 @router.delete("/{pipeline_id}", status_code=204)
 async def delete_pipeline(
     pipeline_id: str,
@@ -279,11 +309,21 @@ async def _sync_timer_schedule(
             break
 
     config = {}
+    block_disabled = False
     if timer_block is not None:
         config = timer_block.config if hasattr(timer_block, "config") else timer_block.get("config", {})
+        block_disabled = (
+            timer_block.disabled if hasattr(timer_block, "disabled")
+            else timer_block.get("disabled", False)
+        )
 
     interval = int(config.get("interval_seconds", 0) or 0)
     cron_expr = config.get("cron_expression", "").strip() or None
+
+    # Disabled block → disable the schedule
+    if block_disabled:
+        interval = 0
+        cron_expr = None
 
     existing = await db["schedules"].find_one({
         "pipeline_id": pipeline_id,
@@ -299,14 +339,26 @@ async def _sync_timer_schedule(
             )
         return
 
+    from llming_plumber.worker.scheduler import compute_next_run
+
     now = datetime.now(UTC)
+
+    # For cron schedules, compute the next real cron slot instead of
+    # triggering immediately.  Interval schedules fire after one interval.
+    if cron_expr:
+        next_run = compute_next_run(cron_expr, now)
+    elif interval > 0:
+        next_run = now
+    else:
+        next_run = now
+
     schedule_doc: dict[str, Any] = {
         "pipeline_id": pipeline_id,
         "enabled": True,
         "tags": ["_auto_timer"],
         "interval_seconds": interval if interval > 0 else None,
         "cron_expression": cron_expr,
-        "next_run_at": now,
+        "next_run_at": next_run,
         "updated_at": now,
     }
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from bson import ObjectId
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -108,12 +111,34 @@ def _lifespan(mode: str) -> Any:
             async def _dispatch_run(run_id: str) -> None:
                 """Dispatch a scheduled run inline (no separate worker needed)."""
                 from llming_plumber.worker.executor import execute_pipeline
-                asyncio.create_task(
-                    execute_pipeline(
-                        {"db": db, "lemming_id": "inline"},
-                        run_id=run_id,
-                    )
-                )
+
+                async def _run_with_timeout() -> None:
+                    timeout = settings.run_timeout
+                    try:
+                        await asyncio.wait_for(
+                            execute_pipeline(
+                                {"db": db, "lemming_id": "inline"},
+                                run_id=run_id,
+                            ),
+                            timeout=timeout,
+                        )
+                    except TimeoutError:
+                        logger.error(
+                            "Run %s timed out after %ds — marking as failed",
+                            run_id, timeout,
+                        )
+                        await db["runs"].update_one(
+                            {"_id": ObjectId(run_id)},
+                            {"$set": {
+                                "status": "failed",
+                                "error": f"Run timed out after {timeout}s",
+                                "finished_at": datetime.now(UTC),
+                            }},
+                        )
+                    except Exception:
+                        logger.exception("Run %s failed unexpectedly", run_id)
+
+                asyncio.create_task(_run_with_timeout())
 
             async def _scheduler_loop() -> None:
                 poll = settings.scheduler_poll_seconds

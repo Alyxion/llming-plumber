@@ -69,6 +69,28 @@ Place after a fan-out chain to consolidate results. For example:
 
 ---
 
+### unite
+
+Fan-in barrier block — waits for all upstream blocks to finish (or fail), then merges results.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| **items** | list | `[]` | Collected upstream results (populated by executor) |
+| **require_all** | bool | `True` | Fail when any upstream block errored |
+
+**Output:** `items` (successes), `succeeded` (int), `failed` (int), `errors` (list of `{block_uid, error}`), `all_ok` (bool)
+
+The unite block has `tolerate_upstream_errors = True`, meaning the executor continues past failed upstream blocks instead of aborting the run. Failed blocks produce error markers (`{_error: True, _block_uid, _message}`) that are delivered into `items`. The block separates successes from errors and optionally raises when `require_all=True`.
+
+Use cases:
+```
+[Crawler A] ──┐
+[Crawler B] ──┤──→ [Unite] → [Sink Scanner]
+[Crawler C] ──┘
+```
+
+---
+
 ### range
 
 Generate a numbered sequence for iteration, similar to Python's `range()`.

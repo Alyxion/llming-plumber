@@ -88,28 +88,46 @@ async def check_schedules(ctx: dict) -> None:  # type: ignore[type-arg]
             )
             continue
 
-        # For timer/interval schedules, skip if a run is already active
+        # For timer/interval schedules, skip if a run is already active.
+        # Stale-run guard: if a "running" run is older than the configured
+        # timeout it is treated as crashed and cancelled so it no longer
+        # blocks future scheduled runs.
         is_timer = bool(
             schedule.get("cron_expression") or schedule.get("interval_seconds")
         )
         if is_timer:
+            from llming_plumber.config import settings as _settings
+
+            stale_cutoff = now - timedelta(seconds=_settings.run_timeout * 2)
             active = await db["runs"].find_one({
                 "pipeline_id": schedule["pipeline_id"],
                 "status": {"$in": ["queued", "running"]},
             })
             if active is not None:
-                # Don't stack — just push next_run_at forward
-                cron_expr = schedule.get("cron_expression")
-                interval = schedule.get("interval_seconds")
-                if cron_expr:
-                    next_run = compute_next_run(cron_expr, now)
+                started = active.get("started_at") or active.get("created_at")
+                if started and started < stale_cutoff:
+                    # Stale run — cancel it so the schedule can proceed.
+                    await db["runs"].update_one(
+                        {"_id": active["_id"]},
+                        {"$set": {
+                            "status": "cancelled",
+                            "error": "Cancelled by scheduler: exceeded stale run timeout",
+                            "finished_at": now,
+                        }},
+                    )
                 else:
-                    next_run = _compute_next_interval(schedule, now)
-                await db["schedules"].update_one(
-                    {"_id": schedule["_id"]},
-                    {"$set": {"next_run_at": next_run}},
-                )
-                continue
+                    # Legitimately active — don't stack.
+                    cron_expr = schedule.get("cron_expression")
+                    interval = schedule.get("interval_seconds")
+                    if cron_expr:
+                        next_run = compute_next_run(cron_expr, now)
+                    else:
+                        next_run = _compute_next_interval(schedule, now)
+                    await db["schedules"].update_one(
+                        {"_id": schedule["_id"]},
+                        {"$set": {"next_run_at": next_run}},
+                    )
+                    continue
 
         # Create run document
         run_doc = {

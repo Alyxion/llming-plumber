@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -47,15 +48,31 @@ class BlockOutput(BaseModel):
 
 
 # ------------------------------------------------------------------
-# Sink — streaming write handle provided by resource blocks
+# FileInfo — metadata returned by Sink.list()
+# ------------------------------------------------------------------
+
+
+class FileInfo(BaseModel):
+    """Metadata for a file in a Sink."""
+
+    path: str
+    filename: str
+    size_bytes: int = 0
+    modified_iso: str = ""
+    content_type: str = ""
+
+
+# ------------------------------------------------------------------
+# Sink — streaming I/O handle provided by resource blocks
 # ------------------------------------------------------------------
 
 
 class Sink(ABC):
-    """Abstract interface for streaming writes to external storage.
+    """Abstract interface for streaming I/O to external storage.
 
     Resource blocks create Sink instances.  Action blocks receive them
-    via ``ctx.sink`` and write data incrementally — no buffering.
+    via ``ctx.sink`` (write) or ``ctx.source_sink`` (read) and perform
+    I/O incrementally — no buffering.
     """
 
     @abstractmethod
@@ -69,6 +86,22 @@ class Sink(ABC):
     ) -> None:
         """Write a single object/file to the sink."""
         ...
+
+    async def read(self, path: str) -> bytes | None:
+        """Read a previously written object.  Returns None if not found."""
+        return None
+
+    async def list(
+        self,
+        prefix: str = "",
+        pattern: str = "*",
+    ) -> AsyncIterator[FileInfo]:
+        """List files under *prefix*, optionally matching a glob *pattern*.
+
+        Default yields nothing.  Storage-backed sinks override this.
+        """
+        return
+        yield  # pragma: no cover — makes this an async generator
 
     async def finalize(self) -> dict[str, Any]:
         """Called when the action block finishes.  Returns summary."""
@@ -89,6 +122,7 @@ class BlockContext(BaseModel):
     block_id: str = ""
     console: Any = Field(default=None, exclude=True)
     sink: Sink | None = Field(default=None, exclude=True)
+    source_sink: Sink | None = Field(default=None, exclude=True)
 
     async def log(
         self,
@@ -133,6 +167,9 @@ class BaseBlock[InputT: BlockInput, OutputT: BlockOutput](ABC):
     fan_out_field: ClassVar[str | None] = None
     # Fan-in: gather all upstream parcels into an ``items`` list input.
     fan_in: ClassVar[bool] = False
+    # When True, the executor continues even if upstream blocks fail.
+    # Failed upstream parcels are delivered as ``{"_error": True, ...}``.
+    tolerate_upstream_errors: ClassVar[bool] = False
 
     # Override to declare multiple input/output sockets.
     # When empty, the block has a single "input" and "output" fitting.

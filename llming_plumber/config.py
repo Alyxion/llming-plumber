@@ -43,7 +43,7 @@ class Settings(BaseSettings):
 
     # Lemming (worker) settings
     lemming_concurrency: int = 4
-    run_timeout: int = 3600
+    run_timeout: int = 7200
     health_check_interval: int = 30
     scheduler_poll_seconds: int = 2
     max_runs_per_pipeline: int = 50

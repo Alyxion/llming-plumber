@@ -4,6 +4,48 @@
 
 ---
 
+## Storage I/O
+
+### sink_file_iterator
+
+List and read files from a connected resource block (Azure Blob, etc.), with built-in skip logic for already-processed files. Fans out individual file parcels — each downstream block runs once per file.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| **folder** | str | `""` | Subfolder prefix to list (supports `{date}`, `{run_id}` templates) |
+| **pattern** | str | `*.txt` | Glob pattern to filter files |
+| **skip_output_folder** | str | `""` | Skip files that already have output in this folder (checks `{stem}.json`) |
+| **max_files** | int | `0` | Maximum files to process (0 = no limit) |
+| **encoding** | str | `utf-8` | Text encoding for reading file content |
+
+**Output (per-file parcel):** `path` (str), `filename` (str), `text` (str), `size` (int), `modified` (str)
+
+**Connection:** Pipe from a resource block → this block. The resource provides the read-side `Sink` via `ctx.source_sink`.
+
+**Skip already processed:** When `skip_output_folder` is set, the iterator checks if `{skip_output_folder}/{stem}.json` exists in the same resource. If it does, the file is skipped — making re-runs automatically resume where they left off.
+
+**Pipeline example:**
+```
+[Azure Blob Resource] → [Sink File Iterator] →(fan-out)→ [LLM Summarizer] → [Sink File Writer] → [Azure Blob Resource]
+```
+
+---
+
+### sink_file_writer
+
+Write a file to a connected resource block. Designed for fan-out iterations: each upstream parcel produces one output file.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| **path** | str | — | Output path in the resource (supports `{filename}`, `{date}` templates) |
+| **content** | str | — | Content to write |
+
+**Output:** `path` (str), `size_bytes` (int), `written` (bool)
+
+**Connection:** Pipe from this block → a resource block. The resource provides the write-side `Sink` via `ctx.sink`.
+
+---
+
 ## File Operations
 
 ### file_read

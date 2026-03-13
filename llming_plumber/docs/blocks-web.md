@@ -181,3 +181,5 @@ Compare two full site crawls page-by-page. Detects new, removed, and modified pa
 [Web Crawler] ──→ [Azure Blob Resource]
 ```
 The crawler writes each page individually to the connected storage resource.
+
+After a run completes, use the built-in [file browser](file-browser.md) to browse, search, and preview crawled files from any past run.

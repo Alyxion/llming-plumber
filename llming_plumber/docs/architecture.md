@@ -255,32 +255,41 @@ Every block has a ``block_kind`` ClassVar: ``"action"`` (default) or ``"resource
 | **Action** | Yes — in topological order | Runs logic, receives/produces parcels | Crawler, LLM, Filter, Text Template |
 | **Resource** | No — config only | Defines a connection target (or source). The executor reads its config and creates a **Sink** (or Source) that connected action blocks use for streaming I/O. | Azure Blob Storage, S3, SFTP |
 
-### Sink — streaming write handle
+### Sink — streaming I/O handle
 
 Resource blocks create ``Sink`` instances via ``create_sink(resolved_config)``.
-Action blocks receive sinks via ``ctx.sink`` and write data incrementally:
+Sinks support three operations:
+
+- ``write(path, content)`` — write a file to storage
+- ``read(path) -> bytes | None`` — read a file (for checkpoints, resume)
+- ``list(prefix, pattern) -> AsyncIterator[FileInfo]`` — enumerate files
+
+Action blocks receive sinks in two ways:
+
+| Direction | Context field | Pipe wiring | Use case |
+|-----------|---------------|-------------|----------|
+| **Write** | ``ctx.sink`` | Action → Resource | Crawlers, writers |
+| **Read** | ``ctx.source_sink`` | Resource → Action | File iterators, readers |
 
 ```python
-async def execute(self, input, ctx):
-    if ctx and ctx.sink:
-        await ctx.sink.write("html/page.html", html_content)
-        await ctx.sink.write("content.json", manifest_json)
-    # Normal output still flows through parcels
-    return MyOutput(page_count=42)
-```
+# Write side (e.g. crawler, file writer)
+if ctx and ctx.sink:
+    await ctx.sink.write("html/page.html", html_content)
 
-This enables **stream-like behavior** — data is written to external storage
-as it is produced, not buffered in memory. A crawler writing 500 pages to
-Azure Blob Storage never holds more than one page in memory.
+# Read side (e.g. file iterator)
+if ctx and ctx.source_sink:
+    async for fi in ctx.source_sink.list("text/", "*.txt"):
+        data = await ctx.source_sink.read(fi.path)
+```
 
 ### Executor handling
 
 1. Resource blocks are processed first (topological order places them last,
    but the executor marks them "completed" immediately without execution).
-2. Before running an action block, the executor checks outgoing pipes for
-   resource targets. If found, it creates a sink from the resource block's
-   config and passes it via ``ctx.sink``.
-3. After the action block finishes, ``sink.finalize()`` is called. The
+2. Before running an action block, the executor checks **outgoing** pipes for
+   resource targets → creates ``ctx.sink`` (write). It also checks **incoming**
+   pipes from resource blocks → creates ``ctx.source_sink`` (read).
+3. After the action block finishes, both sinks are finalized. The write sink
    summary (files written, bytes, etc.) is merged into the output parcel
    with a ``sink_`` prefix.
 
@@ -764,6 +773,9 @@ single `APIRouter` so they can be mounted at any prefix.
 | `DELETE` | `/api/schedules/{id}` | Delete schedule |
 | `GET` | `/api/blocks` | List all registered block types from the catalog |
 | `GET` | `/api/lemmings` | List active lemmings (from `plumber.lemmings` collection) |
+| `GET` | `/api/pipelines/{id}/blocks/{uid}/versions` | List past runs with files for a block ([file browser](file-browser.md)) |
+| `GET` | `/api/runs/{id}/blocks/{uid}/files` | List files/folders for a block in a run |
+| `GET` | `/api/runs/{id}/blocks/{uid}/files/content` | Get file content for preview (512 KB max for text) |
 | `GET` | `/api/health` | Health check (MongoDB + Redis connectivity) |
 | `WS` | `/ws/runs` | Real-time run status updates via WebSocket |
 
@@ -1035,11 +1047,14 @@ don't touch the cache at all.
 | Embeddable | `create_app()` factory + mountable `APIRouter` |
 | Deployment flexibility | Three modes: `all`, `ui`, `worker` — controlled by one env var |
 | Horizontal scaling | N lemming processes/servers, all consuming from the same Redis queue |
-| Crash recovery | ARQ detects dead lemmings via `health_check_interval`, re-queues runs |
+| Crash recovery | Stale runs cancelled on startup; scheduler detects stuck runs (>2× `run_timeout`) and auto-cancels; inline tasks wrapped with `asyncio.wait_for(timeout)` |
+| Resumable runs | `POST /api/runs/{id}/resume` — skips completed blocks, restores parcels from saved output, re-executes from the failure point |
+| Block checkpointing | Web crawler saves crawl state (visited URLs, queue, pages) to sink every 10 pages; resumes automatically on re-execution |
 | Real-time UI | Redis pub/sub → WebSocket, no polling |
 | Run console | Redis list per run — blocks write via `ctx.log()`, auto-expire after 1h |
 | Debug trace | Redis-backed intermediate data snapshots — glimpses, parcel detail, auto-expire |
-| Data protection | Block output not persisted by default — opt in via `PLUMBER_LOG_BLOCK_OUTPUT` |
+| File browser | Browse, search, and preview files from past runs — see [file-browser.md](file-browser.md) |
+| Block output persistence | Block output always saved in `block_states` for resume; `Sink.read()` enables block-level checkpoint loading |
 | Resource limits | Centralised `limits.py` — file size, fan-out, timeouts, all env-configurable |
 | Wall-clock timeout | `MAX_RUN_WALL_SECONDS` checked between blocks and fan-out batches |
 | Audit trail | `lemming_id` on every run + append-only `run_logs` collection |

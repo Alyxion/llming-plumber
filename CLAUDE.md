@@ -30,6 +30,7 @@ The docs are the source of truth. **Always keep them up to date** — when you c
   - [Weather](llming_plumber/docs/blocks-weather.md) — OpenWeatherMap, DWD (2 blocks)
   - [News](llming_plumber/docs/blocks-news.md) — RSS, NewsAPI, Tagesschau (3 blocks)
   - [Government](llming_plumber/docs/blocks-government.md) — Autobahn, NINA, Pegel, Feiertage (4 blocks)
+- [File Browser](llming_plumber/docs/file-browser.md) — browse, search, and preview files from sink blocks across runs
 - [Coding Principles](llming_plumber/docs/coding-principles.md) — async everywhere, type safety, testing, block architecture, standalone usability, MCP tool generation, backward compatibility, extensibility & block discovery, no-code/visual editor parity, i18n
 - [Data Piping](llming_plumber/docs/data-piping.md) — fitting types, type compatibility, coercions, pipe definitions, piping patterns, runtime execution
 

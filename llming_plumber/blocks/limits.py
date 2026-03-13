@@ -56,8 +56,8 @@ DEFAULT_FAN_OUT_CONCURRENCY: int = _env_int("DEFAULT_FAN_OUT_CONCURRENCY", 10)
 FAN_OUT_BATCH_SIZE: int = _env_int("FAN_OUT_BATCH_SIZE", 200)
 """Process fan-out parcels in batches of this size to cap memory."""
 
-MAX_RUN_WALL_SECONDS: int = _env_int("MAX_RUN_WALL_SECONDS", 3600)
-"""Hard wall-clock limit for a single pipeline run (default 1 h).
+MAX_RUN_WALL_SECONDS: int = _env_int("MAX_RUN_WALL_SECONDS", 7200)
+"""Hard wall-clock limit for a single pipeline run (default 2 h).
 The executor checks this after each block completes."""
 
 # ------------------------------------------------------------------

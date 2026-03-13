@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -136,6 +138,64 @@ async def retry_run(
     await arq_pool.enqueue_job("execute_pipeline", run_id=new_run_id)
 
     return {"run_id": new_run_id, "status": "queued"}
+
+
+@router.post("/{run_id}/resume", status_code=200)
+async def resume_run(
+    run_id: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),  # type: ignore[type-arg]
+) -> dict[str, Any]:
+    """Resume a failed/cancelled run from the last completed block.
+
+    Completed blocks are skipped and their outputs reused.  The executor
+    re-runs from the first incomplete block.  Blocks with internal
+    checkpoints (e.g. web_crawler) resume their own progress too.
+    """
+    doc = await db["runs"].find_one({"_id": ObjectId(run_id)})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if doc.get("status") not in ("failed", "cancelled"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only failed or cancelled runs can be resumed",
+        )
+
+    # Reset failed block states so they get re-executed
+    updates: dict[str, Any] = {
+        "status": "queued",
+        "error": None,
+        "finished_at": None,
+        "current_block": None,
+    }
+    for uid, state in (doc.get("block_states") or {}).items():
+        if isinstance(state, dict) and state.get("status") == "failed":
+            updates[f"block_states.{uid}.status"] = ""
+            updates[f"block_states.{uid}.error"] = None
+
+    await db["runs"].update_one(
+        {"_id": ObjectId(run_id)},
+        {"$set": updates},
+    )
+
+    # Dispatch inline
+    asyncio.create_task(_resume_bg(run_id, db))
+    return {"run_id": run_id, "status": "queued", "resumed": True}
+
+
+async def _resume_bg(
+    run_id: str,
+    db: AsyncIOMotorDatabase,  # type: ignore[type-arg]
+) -> None:
+    """Background task: resume a pipeline run in-process."""
+    from llming_plumber.worker.executor import execute_pipeline
+
+    ctx: dict[str, Any] = {"db": db, "lemming_id": "inline"}
+    try:
+        await execute_pipeline(ctx, run_id=run_id)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Resume failed for run %s", run_id,
+        )
 
 
 @router.get("/{run_id}/blocks/{block_uid}/download")
