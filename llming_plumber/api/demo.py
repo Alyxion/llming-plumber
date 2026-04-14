@@ -401,6 +401,79 @@ def _slow_pipeline() -> PipelineDefinition:
     )
 
 
+def _periodic_guard_demo() -> PipelineDefinition:
+    return PipelineDefinition(
+        name=_p("periodic_guard_demo"),
+        description=(
+            "Demonstrates the periodic guard: pauses the pipeline when the "
+            "current second is NOT divisible by 5, resumes when it is. "
+            "Watch the console log to see pause/resume cycles in real time."
+        ),
+        tags=[f"{SAMPLE_TAG_PREFIX}periodic_guard_demo"],
+        owner_id="sample", owner_type="user",
+        blocks=[
+            BlockDefinition(
+                uid="guard", block_type="periodic_guard",
+                label="Clock Guard (every 5s)",
+                config={
+                    "check_block_type": "system_clock",
+                    "check_config": "{}",
+                    "condition": "second % 5 == 0",
+                    "interval_seconds": "5",
+                    "pause_message": "Second is {second} — not divisible by 5, pausing.",
+                    "max_pause_seconds": "120",
+                },
+                position=BlockPosition(x=50, y=200),
+            ),
+            BlockDefinition(
+                uid="split", block_type="split",
+                label="Generate 20 items",
+                config={"expression": "[i for i in range(20)]"},
+                position=BlockPosition(x=350, y=200),
+            ),
+            BlockDefinition(
+                uid="wait", block_type="wait",
+                label="Wait 2s each",
+                config={"seconds": 2},
+                position=BlockPosition(x=650, y=200),
+            ),
+            BlockDefinition(
+                uid="log", block_type="log",
+                label="Log item",
+                config={
+                    "message": "Processed item #{item} at {time}",
+                    "level": "info",
+                },
+                position=BlockPosition(x=950, y=200),
+            ),
+            BlockDefinition(
+                uid="collect", block_type="collect",
+                label="Collect results",
+                config={},
+                position=BlockPosition(x=1250, y=200),
+            ),
+        ],
+        pipes=[
+            PipeDefinition(
+                uid="g-s", source_block_uid="guard", source_fitting_uid="output",
+                target_block_uid="split", target_fitting_uid="input",
+            ),
+            PipeDefinition(
+                uid="s-w", source_block_uid="split", source_fitting_uid="output",
+                target_block_uid="wait", target_fitting_uid="input",
+            ),
+            PipeDefinition(
+                uid="w-l", source_block_uid="wait", source_fitting_uid="output",
+                target_block_uid="log", target_fitting_uid="input",
+            ),
+            PipeDefinition(
+                uid="l-c", source_block_uid="log", source_fitting_uid="output",
+                target_block_uid="collect", target_fitting_uid="input",
+            ),
+        ],
+    )
+
+
 def _http_json_pipeline() -> PipelineDefinition:
     return PipelineDefinition(
         name=_p("http_json_pipeline"),
@@ -613,6 +686,15 @@ CATALOG: list[SampleEntry] = [
         "Reads from cache first; on miss, fetches HTTP and stores for 60s.",
         "cached",
         _cached_http_pipeline,
+    ),
+    # Guard
+    SampleEntry(
+        "periodic_guard_demo", "Flow Control",
+        "Periodic Guard Demo",
+        "Pauses when second is not divisible by 5, resumes when it is. "
+        "Watch the console for pause/resume cycles.",
+        "shield",
+        _periodic_guard_demo,
     ),
 ]
 

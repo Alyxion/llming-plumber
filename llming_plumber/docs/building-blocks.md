@@ -1,6 +1,6 @@
 # Building Blocks
 
-> Plumber ships with **116 blocks** across 9 categories. Each block is a self-contained unit that can be used standalone or wired into pipelines.
+> Plumber ships with **118 blocks** across 9 categories. Each block is a self-contained unit that can be used standalone or wired into pipelines.
 
 ---
 
@@ -10,7 +10,7 @@ Detailed documentation for every block, organized by topic:
 
 | Category | Blocks | Documentation |
 |----------|--------|---------------|
-| **Core** — triggers, flow control, data transformation, utilities | 31 | [blocks-core.md](blocks-core.md) |
+| **Core** — triggers, flow control, data transformation, utilities | 33 | [blocks-core.md](blocks-core.md) |
 | **Web** — crawling, scraping, monitoring, change detection | 6 | [blocks-web.md](blocks-web.md) |
 | **Documents** — Excel, PDF, Word, PowerPoint, Parquet, YAML | 22 | [blocks-documents.md](blocks-documents.md) |
 | **LLM** — chat, summarization, classification, extraction, translation | 10 | [blocks-llm.md](blocks-llm.md) |
@@ -71,7 +71,7 @@ Blocks have one of two kinds:
 
 | Kind | Count | Behavior |
 |------|-------|----------|
-| **action** (default) | 111 | Executed as a pipeline step. Receives input, produces output. |
+| **action** (default) | 112 | Executed as a pipeline step. Receives input, produces output. |
 | **resource** | 1 | Not executed. Defines a storage target. Connected action blocks receive a `Sink` for streaming writes. |
 
 See [Architecture — Block Kinds](architecture.md) for the technical details of the Sink abstraction.

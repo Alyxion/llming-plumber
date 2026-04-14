@@ -198,9 +198,11 @@ db.plumber.schedules.createIndex({ enabled: 1 })
                                      │                               │
                                      │ cancelled                     ├──► completed
                                      ▼                               │
-                                ┌──────────┐                         ├──► failed
-                                │ cancelled│                         │
-                                └──────────┘                         └──► retrying
+                                ┌──────────┐                         ├──► paused ──► running
+                                │ cancelled│                         │       │
+                                └──────────┘                         ├──► failed (or paused timeout)
+                                                                     │
+                                                                     └──► retrying
                                                                           │
                                                             re-enqueue into Redis,
                                                             back to queued
@@ -213,7 +215,7 @@ db.plumber.schedules.createIndex({ enabled: 1 })
   _id: ObjectId,
   pipeline_id: ObjectId,
   pipeline_version: 3,
-  status: "queued" | "running" | "completed" | "failed" | "retrying" | "cancelled",
+  status: "queued" | "running" | "paused" | "completed" | "failed" | "retrying" | "cancelled",
 
   // Scheduling
   created_at: ISODate,
@@ -325,7 +327,7 @@ observes progress.
 ```
 
 **Channel**: `plumber:run:{run_id}:events`
-**Events**: `start`, `block_start`, `block_done`, `error`, `done`
+**Events**: `start`, `block_start`, `block_done`, `paused`, `resumed`, `error`, `done`
 
 When no ARQ worker is running (dev mode), the API server runs the
 pipeline as a background asyncio task using the same executor + event
@@ -718,6 +720,62 @@ runaway pipelines from consuming resources indefinitely.
 
 ---
 
+## Pause / Resume & Fan-Out Checkpointing
+
+The executor supports pausing a running pipeline and resuming it later.
+This is driven by the `periodic_guard` block but the mechanism is generic.
+
+### PauseController
+
+`PauseController` in `worker/pause.py` wraps an `asyncio.Event`. When
+a periodic guard's condition fails, the controller **clears** the event.
+Any block (or the fan-out executor) that calls `await ctx.check_pause()`
+will block on the event until the guard's background task re-evaluates
+the condition and **sets** the event again.
+
+### Run Status
+
+A new `RunStatus.paused` status is added to the run lifecycle. The
+executor sets `status: "paused"` in MongoDB when the pause activates
+and `status: "running"` when it clears. The UI shows the paused state
+with a distinct badge.
+
+```
+  running ──► paused ──► running ──► completed
+                │
+                └─► failed  (if max_pause_seconds exceeded)
+```
+
+### Fan-Out Checkpointing
+
+During fan-out execution the executor saves progress after each batch
+to MongoDB:
+
+```
+block_states.{uid}.checkpoint = {
+    "completed_indices": [0, 1, 2, ...],
+    "total": 500,
+    "batch_size": 200
+}
+```
+
+On resume (after pause or crash recovery), completed fan-out items are
+skipped — only remaining items are executed. This prevents duplicate
+work for long-running fan-out chains.
+
+### SSE Events
+
+Two new event types are published to both the run channel
+(`plumber:run:{run_id}:events`) and the pipeline channel
+(`plumber:pipeline:{pipeline_id}:events`):
+
+| Event | Payload | When |
+|-------|---------|------|
+| `paused` | `{block_uid, message}` | Periodic guard condition fails |
+| `resumed` | `{block_uid, paused_seconds}` | Periodic guard condition passes again |
+
+---
+
 ## Real-Time UI Updates (via Redis Pub/Sub)
 
 When a lemming updates a run's status, it also publishes to a Redis channel.
@@ -1049,6 +1107,8 @@ don't touch the cache at all.
 | Horizontal scaling | N lemming processes/servers, all consuming from the same Redis queue |
 | Crash recovery | Stale runs cancelled on startup; scheduler detects stuck runs (>2× `run_timeout`) and auto-cancels; inline tasks wrapped with `asyncio.wait_for(timeout)` |
 | Resumable runs | `POST /api/runs/{id}/resume` — skips completed blocks, restores parcels from saved output, re-executes from the failure point |
+| Pause / resume | `PauseController` (asyncio.Event) — periodic guard pauses the run, re-checks on interval, resumes automatically or aborts on timeout |
+| Fan-out checkpointing | Executor saves completed indices after each batch to `block_states.{uid}.checkpoint`; on resume, completed items are skipped |
 | Block checkpointing | Web crawler saves crawl state (visited URLs, queue, pages) to sink every 10 pages; resumes automatically on re-execution |
 | Real-time UI | Redis pub/sub → WebSocket, no polling |
 | Run console | Redis list per run — blocks write via `ctx.log()`, auto-expire after 1h |

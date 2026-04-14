@@ -112,6 +112,26 @@ class RunEventPublisher:
             "message": message,
         })
 
+    async def paused(
+        self,
+        block_uid: str,
+        message: str,
+    ) -> None:
+        await self.publish("paused", {
+            "block_uid": block_uid,
+            "message": message,
+        })
+
+    async def resumed(
+        self,
+        block_uid: str,
+        message: str,
+    ) -> None:
+        await self.publish("resumed", {
+            "block_uid": block_uid,
+            "message": message,
+        })
+
     async def error(
         self,
         block_uid: str,

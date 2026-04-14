@@ -113,6 +113,8 @@ class BlockContext(BaseModel):
 
     Passed as None when a block runs standalone (outside a pipeline).
     Blocks can write to the run console via ``await ctx.log("message")``.
+    Long-running blocks should call ``await ctx.check_pause()`` at natural
+    breakpoints (e.g. between pages, records) to respect periodic guards.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -123,6 +125,7 @@ class BlockContext(BaseModel):
     console: Any = Field(default=None, exclude=True)
     sink: Sink | None = Field(default=None, exclude=True)
     source_sink: Sink | None = Field(default=None, exclude=True)
+    pause_ctl: Any = Field(default=None, exclude=True)
 
     async def log(
         self,
@@ -136,6 +139,16 @@ class BlockContext(BaseModel):
         """
         if self.console is not None:
             await self.console.write(self.block_id, message, level=level)
+
+    async def check_pause(self) -> None:
+        """Wait if the pipeline is paused by a periodic guard.
+
+        Call this at natural breakpoints in long-running blocks (between
+        pages, records, iterations).  No-op when running standalone or
+        when no guard is active.
+        """
+        if self.pause_ctl is not None:
+            await self.pause_ctl.wait_if_paused()
 
 
 class BaseBlock[InputT: BlockInput, OutputT: BlockOutput](ABC):

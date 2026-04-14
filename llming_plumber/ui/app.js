@@ -91,9 +91,15 @@ const BLOCK_ICONS = {
   // LLM
   sink_scanner: 'document_scanner',
   content_summarizer: 'document_scanner',
+  // Flow
+  guard: 'verified_user',
+  periodic_guard: 'shield',
+  system_clock: 'schedule',
   // Data / Storage
   sink_file_iterator: 'manage_search',
   sink_file_writer: 'upload_file',
+  // Data / Network
+  ip_geolocation: 'travel_explore',
 }
 function blockIcon(bt) { return BLOCK_ICONS[bt] || 'extension' }
 
@@ -275,7 +281,7 @@ function portToFittingUid(fittings, portClass) {
 
 function nodeHtml(blockType, label, status, disabled, blockKind) {
   const icon = blockIcon(blockType)
-  const sc = { running: 'var(--p-node-running)', completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', idle: 'var(--p-node-idle)' }
+  const sc = { running: 'var(--p-node-running)', completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', paused: '#fbbf24', idle: 'var(--p-node-idle)' }
   const isResource = blockKind === 'resource'
   const cls = `block-node block-node--${status || 'idle'}${disabled ? ' block-node--disabled' : ''}${isResource ? ' block-node--resource' : ''}`
   return `<div class="${cls}">
@@ -656,11 +662,11 @@ const PipelineListPage = defineComponent({
               : h('div', { class: 'run-history-list' }, pipelineRuns.value.map(r => {
                   const isOpen = expandedRun.value === r.id
                   const rd = expandedRunDetail.value
-                  const statusColors = { completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', running: 'var(--p-node-running)' }
+                  const statusColors = { completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', running: 'var(--p-node-running)', paused: '#fbbf24' }
                   return h('div', { key: r.id, class: 'run-history-item' + (isOpen ? ' run-history-item--open' : '') }, [
                     h('div', { class: 'run-history-item__row', onClick: (e) => toggleRunDetail(r.id, e) }, [
                       h('span', { class: 'material-icons', style: 'font-size:14px; color:' + (statusColors[r.status] || 'var(--p-text-secondary)') },
-                        r.status === 'completed' ? 'check_circle' : r.status === 'failed' ? 'error' : r.status === 'running' ? 'play_circle' : 'circle'),
+                        r.status === 'completed' ? 'check_circle' : r.status === 'failed' ? 'error' : r.status === 'running' ? 'play_circle' : r.status === 'paused' ? 'pause_circle' : 'circle'),
                       h('span', { class: `status-badge status-badge--${r.status}`, style: 'font-size:10px; padding:1px 5px' }, r.status),
                       h('span', { style: 'font-size:11px; color:var(--p-text-secondary)' }, fmtRunTime(r.created_at)),
                       fmtRunDur(r) ? h('span', { style: 'font-size:11px; color:var(--p-text-secondary)' }, fmtRunDur(r)) : null,
@@ -1452,7 +1458,7 @@ const PipelineEditorPage = defineComponent({
     function subscribePipelineEvents(pid) {
       if (pipelineEvtSource) { pipelineEvtSource.close(); pipelineEvtSource = null }
       pipelineEvtSource = new EventSource(`/api/pipelines/${pid}/events`)
-      for (const evtType of ['start', 'block_start', 'block_done', 'block_progress', 'error', 'done']) {
+      for (const evtType of ['start', 'block_start', 'block_done', 'block_progress', 'paused', 'resumed', 'error', 'done']) {
         pipelineEvtSource.addEventListener(evtType, (e) => {
           try {
             const data = JSON.parse(e.data)
@@ -1483,7 +1489,7 @@ const PipelineEditorPage = defineComponent({
       if (dfId != null) {
         const el = document.getElementById(`node-${dfId}`)
         if (el) {
-          const sc = { running: 'var(--p-node-running)', completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', idle: 'var(--p-node-idle)' }
+          const sc = { running: 'var(--p-node-running)', completed: 'var(--p-node-completed)', failed: 'var(--p-node-failed)', paused: '#fbbf24', idle: 'var(--p-node-idle)' }
           const statusEl = el.querySelector('.block-node__status')
           if (statusEl) statusEl.style.background = sc[status] || sc.idle
           // Apply status class on the drawflow-node wrapper for border styling
@@ -1568,7 +1574,7 @@ const PipelineEditorPage = defineComponent({
         try {
           const evtSource = new EventSource(`/api/runs/${runId}/events`)
           evtSource.addEventListener('connected', () => {})
-          for (const evtType of ['start', 'block_start', 'block_done', 'block_progress', 'error', 'done']) {
+          for (const evtType of ['start', 'block_start', 'block_done', 'block_progress', 'paused', 'resumed', 'error', 'done']) {
             evtSource.addEventListener(evtType, (e) => {
               try { handleRunEvent(evtType, JSON.parse(e.data)) } catch {}
               if (evtType === 'done') { evtSource.close(); running.value = false }
@@ -1667,6 +1673,14 @@ const PipelineEditorPage = defineComponent({
               node.data = { ...node.data, errorFields: errorFields.map(f => f.field) }
             }
           }
+          break
+        case 'paused':
+          setNodeStatus(data.block_uid, 'paused')
+          runLog.value.push({ type: 'error', message: `PAUSED: ${data.message}`, ts, block_uid: data.block_uid })
+          break
+        case 'resumed':
+          setNodeStatus(data.block_uid, 'completed')
+          runLog.value.push({ type: 'success', message: `RESUMED: ${data.message}`, ts, block_uid: data.block_uid })
           break
         case 'error':
           if (!data.block_uid || data.message === runLog.value[runLog.value.length - 1]?.message) break // skip duplicate

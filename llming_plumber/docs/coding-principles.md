@@ -182,6 +182,25 @@ Blocks write to the per-run console via `await ctx.log("Processing...")`.
 The console is backed by Redis and accessible via the API. It gracefully
 no-ops when `ctx` is `None` or Redis is unavailable.
 
+### Pausable Blocks
+
+Long-running blocks should call `await ctx.check_pause()` at natural
+breakpoints to cooperate with the pause/resume framework (see
+[Architecture — Pause / Resume](architecture.md#pause--resume--fan-out-checkpointing)).
+This is **opt-in** — blocks that never call `check_pause()` still respect
+pause at fan-out batch boundaries, because the executor checks there
+automatically.
+
+```python
+async def execute(self, input: CrawlInput, ctx: BlockContext | None) -> CrawlOutput:
+    for url in urls:
+        await self._fetch(url)
+        if ctx:
+            await ctx.check_pause()  # suspends here if a periodic_guard paused the run
+```
+
+When `ctx` is `None` (standalone usage) or no guard is active, `check_pause()` is a no-op.
+
 ### Safe Expression Interpolation
 
 Blocks that accept user-facing text with dynamic values (Log, Text Template)

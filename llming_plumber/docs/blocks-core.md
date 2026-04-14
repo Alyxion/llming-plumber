@@ -91,6 +91,77 @@ Use cases:
 
 ---
 
+### guard
+
+Run a pre-flight check block and abort the pipeline if a condition fails.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| **check_block_type** | str (combobox) | — | Block type to run as a check (e.g. `ip_geolocation`) |
+| **check_config** | str (code) | `{}` | JSON config to pass to the check block |
+| **condition** | str (code) | — | Safe-eval expression that must be true for the pipeline to continue. Uses the check block's output fields as variables. |
+| **abort_message** | str | `Guard check failed — pipeline aborted.` | Message shown on abort. Supports `{field}` placeholders from the check output. |
+
+**Output:** `passed` (bool), `check_value` (str — stringified condition result), `check_output` (dict — full output from the check block)
+
+The guard block instantiates and executes the specified check block internally, then evaluates `condition` against its output using the [safe expression evaluator](blocks-core.md#text_template). If the condition evaluates to false, the block raises `GuardAbortError`, which aborts the entire pipeline run.
+
+`cache_ttl` is `0` — guards always execute fresh.
+
+Use case — abort crawl pipelines when the public IP matches the office IP:
+```
+[Guard (ip_geolocation → condition: results[0]["query"] != "88.79.…")] → [Crawler] → …
+```
+
+---
+
+### periodic_guard
+
+Run a check block on execute (like `guard`), then periodically re-check via a background task. If the condition fails the pipeline **pauses** (not aborts). When it passes again the pipeline resumes automatically. If paused longer than `max_pause_seconds` the run aborts.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| **check_block_type** | str (combobox) | — | Block type to run as a check (e.g. `ip_geolocation`) |
+| **check_config** | str (code) | `{}` | JSON config to pass to the check block |
+| **condition** | str (code) | — | Safe-eval expression that must be true for execution to continue |
+| **interval_seconds** | int | `60` | How often to re-evaluate the condition while paused |
+| **pause_message** | str | — | Message shown while paused. Supports `{field}` placeholders from the check output. |
+| **max_pause_seconds** | int | `7200` | Maximum time to stay paused before aborting (default 2 hours) |
+
+**Block type:** `periodic_guard` | **Icon:** `tabler/shield-check` | **Categories:** `core/flow` | **cache_ttl:** `0`
+
+**Output:** `passed` (bool), `check_value` (str — stringified condition result), `check_output` (dict — full output from the check block)
+
+The periodic guard runs the check block once on initial execute. If the condition passes, the pipeline continues normally. If it fails, the run enters a `paused` state and a background task re-evaluates the condition every `interval_seconds`. The moment the condition passes, the run resumes from where it left off.
+
+**Difference from `guard`:** the `guard` block aborts the pipeline immediately when the condition fails. `periodic_guard` pauses and watches — the pipeline resumes automatically when the condition becomes true again.
+
+Use case — pause crawl pipelines when the public IP matches the office IP, auto-resume when the IP changes:
+```
+[Periodic Guard (ip_geolocation → condition: results[0]["query"] != "88.79.…")] → [Crawler] → …
+```
+
+---
+
+#### `ctx.check_pause()` for Block Authors
+
+Long-running blocks should call `await ctx.check_pause()` at natural breakpoints (e.g. between pages, between batches). When a `periodic_guard` upstream has paused the run, `check_pause()` suspends the block until the guard clears. When no guard is active or the block runs standalone (`ctx=None`), the call is a no-op.
+
+Already integrated in:
+- **Web crawler** — between pages
+- **Fan-out executor** — between batches
+
+```python
+# Inside a long-running block
+async def execute(self, input: MyInput, ctx: BlockContext | None) -> MyOutput:
+    for page in pages:
+        await self._process(page)
+        if ctx:
+            await ctx.check_pause()
+```
+
+---
+
 ### range
 
 Generate a numbered sequence for iteration, similar to Python's `range()`.

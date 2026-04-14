@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Golden Crust Bakery</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: Georgia, 'Times New Roman', serif; color: #3b2314; background: #fdf6ee; }
+    header {
+      background: #3b2314; color: #fdf6ee; text-align: center; padding: 3rem 1rem;
+    }
+    header h1 { font-size: 2.8rem; letter-spacing: 2px; }
+    header p { margin-top: 0.5rem; font-style: italic; font-size: 1.1rem; opacity: 0.85; }
+    nav {
+      background: #5a3a28; text-align: center; padding: 0.8rem;
+      position: sticky; top: 0; z-index: 10;
+    }
+    nav a { color: #fdf6ee; text-decoration: none; margin: 0 1.2rem; font-size: 1rem; }
+    nav a:hover { text-decoration: underline; }
+    section { max-width: 900px; margin: 0 auto; padding: 3rem 1.5rem; }
+    h2 { font-size: 2rem; margin-bottom: 1rem; border-bottom: 2px solid #d4a96a; padding-bottom: 0.4rem; }
+    .menu-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 1.5rem; margin-top: 1.5rem;
+    }
+    .menu-card {
+      background: #fff; border-radius: 12px; padding: 1.5rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08); text-align: center;
+    }
+    .menu-card .icon { font-size: 3rem; margin-bottom: 0.5rem; }
+    .menu-card h3 { font-size: 1.2rem; margin-bottom: 0.3rem; }
+    .menu-card .price { color: #b5651d; font-weight: bold; font-size: 1.1rem; }
+    .menu-card p { font-size: 0.9rem; color: #665; margin-top: 0.4rem; }
+    .about-content { line-height: 1.8; font-size: 1.05rem; }
+    .hours-table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    .hours-table td { padding: 0.6rem 1rem; border-bottom: 1px solid #e8d5c0; }
+    .hours-table tr:last-child td { border-bottom: none; }
+    .hours-table td:last-child { text-align: right; font-weight: bold; }
+    .contact-info { line-height: 2; font-size: 1.05rem; margin-top: 1rem; }
+    footer {
+      background: #3b2314; color: #fdf6ee; text-align: center;
+      padding: 1.5rem; margin-top: 2rem; font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Golden Crust Bakery</h1>
+  <p>Freshly baked with love since 1998</p>
+</header>
+
+<nav>
+  <a href="#menu">Menu</a>
+  <a href="#about">About</a>
+  <a href="#hours">Hours</a>
+  <a href="#contact">Contact</a>
+</nav>
+
+<section id="menu">
+  <h2>Our Menu</h2>
+  <div class="menu-grid">
+    <div class="menu-card">
+      <div class="icon">&#127838;</div>
+      <h3>Sourdough Loaf</h3>
+      <div class="price">$6.50</div>
+      <p>72-hour fermented, crispy crust, soft crumb</p>
+    </div>
+    <div class="menu-card">
+      <div class="icon">&#129360;</div>
+      <h3>Butter Croissant</h3>
+      <div class="price">$3.75</div>
+      <p>Flaky, golden, made with French butter</p>
+    </div>
+    <div class="menu-card">
+      <div class="icon">&#127856;</div>
+      <h3>Cinnamon Roll</h3>
+      <div class="price">$4.25</div>
+      <p>Warm, gooey, topped with cream cheese glaze</p>
+    </div>
+    <div class="menu-card">
+      <div class="icon">&#127874;</div>
+      <h3>Chocolate Cake</h3>
+      <div class="price">$32.00</div>
+      <p>Three-layer dark chocolate with ganache</p>
+    </div>
+    <div class="menu-card">
+      <div class="icon">&#129473;</div>
+      <h3>Rye Bread</h3>
+      <div class="price">$5.50</div>
+      <p>Dense, hearty, with caraway seeds</p>
+    </div>
+    <div class="menu-card">
+      <div class="icon">&#127850;</div>
+      <h3>Blueberry Muffin</h3>
+      <div class="price">$3.25</div>
+      <p>Bursting with fresh blueberries</p>
+    </div>
+  </div>
+</section>
+
+<section id="about">
+  <h2>About Us</h2>
+  <p class="about-content">
+    Golden Crust Bakery started as a family dream in a tiny kitchen in 1998. Today we still use the same
+    recipes passed down through three generations. Every loaf is shaped by hand, every pastry made from
+    scratch before dawn. We source our flour from local mills and our eggs from free-range farms down
+    the road. No shortcuts, no preservatives &mdash; just honest baking.
+  </p>
+</section>
+
+<section id="hours">
+  <h2>Opening Hours</h2>
+  <table class="hours-table">
+    <tr><td>Monday &ndash; Friday</td><td>6:00 AM &ndash; 7:00 PM</td></tr>
+    <tr><td>Saturday</td><td>7:00 AM &ndash; 5:00 PM</td></tr>
+    <tr><td>Sunday</td><td>8:00 AM &ndash; 2:00 PM</td></tr>
+  </table>
+</section>
+
+<section id="contact">
+  <h2>Contact</h2>
+  <div class="contact-info">
+    <p>123 Flour Lane, Doughville</p>
+    <p>Phone: (555) 012-3456</p>
+    <p>Email: hello@goldencrust.example</p>
+  </div>
+</section>
+
+<footer>
+  &copy; 2026 Golden Crust Bakery. All rights reserved.
+</footer>
+
+</body>
+</html>

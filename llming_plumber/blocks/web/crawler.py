@@ -331,6 +331,10 @@ class WebCrawlerBlock(BaseBlock[WebCrawlerInput, WebCrawlerOutput]):
             cookies=httpx.Cookies(),
         ) as client:
             while queue and len(pages) < input.max_pages:
+                # Respect periodic guard — pause between pages
+                if ctx:
+                    await ctx.check_pause()
+
                 url, depth = queue.pop(0)
 
                 if url in visited:

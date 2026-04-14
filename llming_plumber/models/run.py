@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 class RunStatus(StrEnum):
     queued = "queued"
     running = "running"
+    paused = "paused"
     completed = "completed"
     failed = "failed"
     retrying = "retrying"

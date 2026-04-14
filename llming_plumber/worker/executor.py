@@ -42,6 +42,7 @@ from llming_plumber.models.pipeline import (
 from llming_plumber.worker.console import RunConsole
 from llming_plumber.worker.debug_trace import DebugTracer
 from llming_plumber.worker.events import RunEventPublisher
+from llming_plumber.worker.pause import PauseController
 
 logger = logging.getLogger(__name__)
 
@@ -366,6 +367,10 @@ async def run_blocks(
     run_start = time.monotonic()
     await tracer.record_order(order)
 
+    # Periodic guard: shared pause controller + background task handle
+    pause_ctl: PauseController | None = None
+    guard_task: asyncio.Task | None = None  # type: ignore[type-arg]
+
     # Load existing block states for resume — completed blocks are skipped
     run_doc = await db["runs"].find_one({"_id": ObjectId(run_id)})
     saved_states: dict[str, dict[str, Any]] = {}
@@ -378,6 +383,16 @@ async def run_blocks(
         await events.start(order, len(order))
 
     for block_uid in order:
+        # Check if periodic guard task has failed (e.g., max pause exceeded)
+        if guard_task is not None and guard_task.done():
+            exc = guard_task.exception()
+            if exc is not None:
+                raise exc
+
+        # Wait if paused by periodic guard before starting next block
+        if pause_ctl is not None:
+            await pause_ctl.wait_if_paused()
+
         # Wall-clock timeout check
         elapsed_total = time.monotonic() - run_start
         if elapsed_total > MAX_RUN_WALL_SECONDS:
@@ -526,6 +541,7 @@ async def run_blocks(
             console=console,
             sink=sink,
             source_sink=source_sink,
+            pause_ctl=pause_ctl,
         )
 
         start = time.monotonic()
@@ -560,6 +576,7 @@ async def run_blocks(
                         fan_out_source_uid or "",
                         fan_out_parcels, ctx,
                         run_start=run_start,
+                        db=db,
                     )
                 else:
                     output_dict = await _execute_single(
@@ -711,6 +728,54 @@ async def run_blocks(
             output_summary=_summarize_output(last_output),
         ).model_dump())
 
+        # Spawn periodic guard background task after successful initial check
+        if block_def.block_type == "periodic_guard" and guard_task is None:
+            import json as _json
+
+            from llming_plumber.blocks.core.periodic_guard import run_guard_loop
+
+            try:
+                _guard_cfg = _json.loads(
+                    block_def.config.get("check_config", "{}"),
+                )
+            except Exception:
+                _guard_cfg = {}
+
+            pause_ctl = PauseController()
+            guard_task = asyncio.create_task(
+                run_guard_loop(
+                    check_block_type=block_def.config.get(
+                        "check_block_type", "",
+                    ),
+                    check_config=_guard_cfg,
+                    condition=block_def.config.get("condition", "True"),
+                    interval_seconds=float(
+                        block_def.config.get("interval_seconds", 60),
+                    ),
+                    pause_message=block_def.config.get(
+                        "pause_message",
+                        "Guard condition failed — pipeline paused.",
+                    ),
+                    max_pause_seconds=int(
+                        block_def.config.get("max_pause_seconds", 7200),
+                    ),
+                    pause_ctl=pause_ctl,
+                    guard_block_uid=block_uid,
+                    run_id=run_id,
+                    db=db,
+                    console=console,
+                    events=events,
+                ),
+            )
+
+    # Cancel periodic guard task if running
+    if guard_task is not None:
+        guard_task.cancel()
+        try:
+            await guard_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
     total_ms = (time.monotonic() - run_start) * 1000
     if events:
         await events.done(
@@ -860,6 +925,7 @@ async def _execute_fan_out_branch(
     ctx: BlockContext,
     *,
     run_start: float = 0.0,
+    db: Any = None,
 ) -> dict[str, Any]:
     """Run a block once per fan-out parcel, in batches with concurrency."""
     check_list_size(
@@ -885,9 +951,29 @@ async def _execute_fan_out_branch(
             inp = input_type(**{**resolved_config, **merged})
             return await block.execute(inp, ctx)
 
+    # Load checkpoint: skip already-completed items on resume
+    start_index = 0
+    resumed_results: list[dict[str, Any]] = []
+    if ctx.run_id:
+        checkpoint = await _load_fan_out_checkpoint(
+            db, ctx.run_id, block_uid,
+        ) if db else None
+        if checkpoint is not None:
+            start_index = checkpoint.get("completed_count", 0)
+            resumed_results = checkpoint.get("completed_results", [])
+            if ctx.console:
+                await ctx.console.write(
+                    block_uid,
+                    f"Resuming fan-out from item {start_index}/{len(fan_out_parcels)}",
+                )
+
     # Process in batches to avoid creating thousands of coroutines at once
     all_results: list[BlockOutput] = []
-    for i in range(0, len(fan_out_parcels), batch_size):
+    for i in range(start_index, len(fan_out_parcels), batch_size):
+        # Wait if paused by periodic guard
+        if ctx.pause_ctl is not None:
+            await ctx.pause_ctl.wait_if_paused()
+
         # Wall-clock check between batches
         if run_start and time.monotonic() - run_start > MAX_RUN_WALL_SECONDS:
             msg = (
@@ -899,10 +985,27 @@ async def _execute_fan_out_branch(
         batch_results = await asyncio.gather(*[_run_one(p) for p in batch])
         all_results.extend(batch_results)
 
-    parcels[block_uid] = [
-        Parcel(uid=block_uid, fields=r.model_dump()) for r in all_results
+        # Save checkpoint after each batch
+        if db and ctx.run_id:
+            await _save_fan_out_checkpoint(
+                db, ctx.run_id, block_uid,
+                completed_count=i + len(batch),
+                completed_results=[
+                    *resumed_results,
+                    *[r.model_dump() for r in all_results],
+                ],
+            )
+
+    # Combine resumed + new results
+    all_result_dicts = [
+        *resumed_results,
+        *[r.model_dump() for r in all_results],
     ]
-    return all_results[0].model_dump() if all_results else {}
+
+    parcels[block_uid] = [
+        Parcel(uid=block_uid, fields=d) for d in all_result_dicts
+    ]
+    return all_result_dicts[0] if all_result_dicts else {}
 
 
 async def _execute_fan_in(
@@ -941,6 +1044,45 @@ async def _execute_fan_in(
     input_data = input_type(**{**resolved_config, "items": all_items})
     output = await block.execute(input_data, ctx)
     return output.model_dump()
+
+
+async def _save_fan_out_checkpoint(
+    db: Any,
+    run_id: str,
+    block_uid: str,
+    completed_count: int,
+    completed_results: list[dict[str, Any]],
+) -> None:
+    """Persist fan-out progress so the run can resume mid-iteration."""
+    await db["runs"].update_one(
+        {"_id": ObjectId(run_id)},
+        {"$set": {
+            f"block_states.{block_uid}.checkpoint": {
+                "completed_count": completed_count,
+                "completed_results": completed_results,
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+        }},
+    )
+
+
+async def _load_fan_out_checkpoint(
+    db: Any,
+    run_id: str,
+    block_uid: str,
+) -> dict[str, Any] | None:
+    """Load fan-out checkpoint from a previous run attempt."""
+    doc = await db["runs"].find_one(
+        {"_id": ObjectId(run_id)},
+        {f"block_states.{block_uid}.checkpoint": 1},
+    )
+    if doc:
+        states = doc.get("block_states", {})
+        if isinstance(states, dict):
+            block_state = states.get(block_uid, {})
+            if isinstance(block_state, dict):
+                return block_state.get("checkpoint")
+    return None
 
 
 async def _record_block_failure(
@@ -1024,7 +1166,7 @@ async def _prune_old_runs(db: Any, pipeline_id: Any) -> None:
         result = await db["runs"].delete_many({
             "pipeline_id": pipeline_id,
             "_id": {"$nin": keep_ids},
-            "status": {"$nin": ["queued", "running"]},
+            "status": {"$nin": ["queued", "running", "paused"]},
         })
         if result.deleted_count:
             # Also clean up associated run_logs

@@ -140,6 +140,16 @@ MAX_WAIT_SECONDS: int = _env_int("MAX_WAIT_SECONDS", 300)
 """Maximum seconds a wait block may sleep (default 5 min)."""
 
 # ------------------------------------------------------------------
+# Periodic guard
+# ------------------------------------------------------------------
+
+GUARD_MIN_INTERVAL_SECONDS: int = _env_int("GUARD_MIN_INTERVAL_SECONDS", 10)
+"""Minimum seconds between periodic guard checks (prevent abuse)."""
+
+MAX_PAUSE_SECONDS: int = _env_int("MAX_PAUSE_SECONDS", 7200)
+"""Maximum seconds a run can stay paused before auto-abort (default 2 h)."""
+
+# ------------------------------------------------------------------
 # Recursion / depth
 # ------------------------------------------------------------------
 
