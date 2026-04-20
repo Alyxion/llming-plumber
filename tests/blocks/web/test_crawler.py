@@ -275,7 +275,7 @@ def test_slugify_domain() -> None:
 
 def test_url_to_slug() -> None:
     assert _url_to_slug("https://example.com/") == "index"
-    assert _url_to_slug("https://example.com/products/nozzles.html") == "products_nozzles_html"
+    assert _url_to_slug("https://example.com/products/widgets.html") == "products_widgets_html"
     assert _url_to_slug("https://example.com/about") == "about"
 
 
